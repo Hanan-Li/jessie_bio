@@ -4,6 +4,8 @@
 //! ports and parameters are. Container, parameter schema and resource hints
 //! arrive once codegen needs them.
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 
 use crate::types::{Cardinality, SemanticType};
@@ -38,9 +40,75 @@ pub struct NodeSpec {
     pub outputs: Vec<PortSpec>,
 }
 
+impl NodeSpec {
+    pub fn input(&self, name: &str) -> Option<&PortSpec> {
+        self.inputs.iter().find(|port| port.name == name)
+    }
+
+    pub fn output(&self, name: &str) -> Option<&PortSpec> {
+        self.outputs.iter().find(|port| port.name == name)
+    }
+}
+
+/// All node specs the compiler knows about, looked up by (id, version).
+#[derive(Debug, Clone, Default)]
+pub struct SpecRegistry {
+    specs: BTreeMap<(String, String), NodeSpec>,
+}
+
+impl SpecRegistry {
+    pub fn new(specs: Vec<NodeSpec>) -> SpecRegistry {
+        let mut registry = SpecRegistry::default();
+        for spec in specs {
+            registry
+                .specs
+                .insert((spec.id.clone(), spec.version.clone()), spec);
+        }
+        registry
+    }
+
+    pub fn get(&self, id: &str, version: &str) -> Option<&NodeSpec> {
+        self.specs.get(&(id.to_string(), version.to_string()))
+    }
+}
+
+/// Registry with the specs in `testdata/specs/`, shared by tests across modules.
+#[cfg(test)]
+pub(crate) fn test_registry() -> SpecRegistry {
+    let sources = [
+        include_str!("../testdata/specs/fastqc.spec.json"),
+        include_str!("../testdata/specs/multiqc.spec.json"),
+    ];
+    let specs = sources
+        .iter()
+        .map(|json| serde_json::from_str(json).unwrap())
+        .collect();
+    SpecRegistry::new(specs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registry_looks_up_by_id_and_version() {
+        let registry = test_registry();
+        assert!(registry.get("fastqc", "0.1.0").is_some());
+        assert!(registry.get("fastqc", "9.9.9").is_none());
+        assert!(registry.get("nope", "0.1.0").is_none());
+    }
+
+    #[test]
+    fn finds_ports_by_name() {
+        let registry = test_registry();
+        let multiqc = registry.get("multiqc", "0.1.0").unwrap();
+        assert_eq!(multiqc.input("reports").unwrap().ty, SemanticType::QcReport);
+        assert!(
+            multiqc.input("html").is_none(),
+            "html is an output, not an input"
+        );
+        assert!(multiqc.output("html").is_some());
+    }
 
     #[test]
     fn parses_fastqc_spec() {

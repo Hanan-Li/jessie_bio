@@ -1,10 +1,12 @@
-//! Canvas → IR → segments → Nextflow DSL2.
+//! Canvas → PipelineGraph (the IR) → segments → Nextflow DSL2.
 //!
 //! P0a skeleton: the real pipeline stages arrive as we build them.
 
 pub mod canvas;
+pub mod pipeline_graph;
 pub mod spec;
 pub mod types;
+pub mod validate;
 
 /// Compile a canvas into Nextflow DSL2 source text.
 ///
