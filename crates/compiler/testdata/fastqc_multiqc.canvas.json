@@ -1,0 +1,21 @@
+{
+  "nodes": [
+    {
+      "id": "fastqc_1",
+      "spec": "fastqc",
+      "version": "0.1.0"
+    },
+    {
+      "id": "multiqc_1",
+      "spec": "multiqc",
+      "version": "0.1.0",
+      "params": { "title": "My first QC report" }
+    }
+  ],
+  "edges": [
+    {
+      "from": { "node": "fastqc_1", "port": "report" },
+      "to": { "node": "multiqc_1", "port": "reports" }
+    }
+  ]
+}

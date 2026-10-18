@@ -1,0 +1,15 @@
+[package]
+name = "compiler"
+description = "Compiles a pipeline canvas (JSON) into Nextflow DSL2."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
