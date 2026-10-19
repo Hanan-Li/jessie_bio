@@ -1,0 +1,6 @@
+# Pins the Rust toolchain for everyone: rustup reads this whenever cargo runs
+# in this repo (locally and in CI) and installs the version if missing.
+# Upgrade deliberately, in its own PR.
+[toolchain]
+channel = "1.98"
+components = ["rustfmt", "clippy"]
