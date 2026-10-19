@@ -26,6 +26,39 @@ pub enum SemanticType {
     ReportArtifact,
 }
 
+/// Can data of type `output` flow into a port that accepts `input`?
+///
+/// The rules, as the tests below spell out:
+/// - Formats must match: a FASTQ never feeds a BAM port.
+/// - FASTQ: `paired` must match exactly. Paired-end and single-end reads
+///   are processed differently, so neither can stand in for the other.
+/// - BAM: the output must have every qualifier the input requires. A sorted,
+///   indexed BAM can feed a port that only needs "sorted"; an unsorted BAM
+///   cannot feed a port that needs "sorted".
+/// - Formats without qualifiers connect when the formats are the same.
+pub fn can_connect(output: &SemanticType, input: &SemanticType) -> bool {
+    match (output, input) {
+        (
+            &SemanticType::Fastq { paired: out_paired },
+            &SemanticType::Fastq { paired: in_paired },
+        ) => out_paired == in_paired,
+        (
+            &SemanticType::Bam {
+                sorted: is_sorted,
+                indexed: is_indexed,
+            },
+            &SemanticType::Bam {
+                sorted: needs_sorted,
+                indexed: needs_indexed,
+            },
+        ) => (is_sorted || !needs_sorted) && (is_indexed || !needs_indexed),
+        // Everything else: formats without qualifiers, or two different
+        // formats. Exact equality is the strict, safe default for any
+        // qualified format added later without its own rule here.
+        _ => output == input,
+    }
+}
+
 /// Whether a port carries one item per sample or one item for the whole dataset.
 ///
 /// A `PerSample` output feeding a `PerDataset` input is a gather: the
@@ -53,6 +86,58 @@ mod tests {
         let ty: SemanticType = serde_json::from_str(r#"{"format": "count_matrix"}"#).unwrap();
         assert_eq!(ty, SemanticType::CountMatrix);
     }
+
+    // ---- can_connect ----
+
+    fn bam(sorted: bool, indexed: bool) -> SemanticType {
+        SemanticType::Bam { sorted, indexed }
+    }
+
+    #[test]
+    fn same_simple_format_connects() {
+        assert!(can_connect(
+            &SemanticType::QcReport,
+            &SemanticType::QcReport
+        ));
+    }
+
+    #[test]
+    fn different_formats_do_not_connect() {
+        assert!(!can_connect(
+            &SemanticType::QcReport,
+            &SemanticType::CountMatrix
+        ));
+        assert!(!can_connect(
+            &SemanticType::Fastq { paired: true },
+            &bam(false, false)
+        ));
+    }
+
+    #[test]
+    fn fastq_pairedness_must_match() {
+        let paired = SemanticType::Fastq { paired: true };
+        let single = SemanticType::Fastq { paired: false };
+        assert!(can_connect(&paired, &paired));
+        assert!(can_connect(&single, &single));
+        assert!(!can_connect(&paired, &single));
+        assert!(!can_connect(&single, &paired));
+    }
+
+    #[test]
+    fn bam_with_extra_qualifiers_connects() {
+        assert!(can_connect(&bam(true, true), &bam(true, false)));
+        assert!(can_connect(&bam(true, true), &bam(false, false)));
+        assert!(can_connect(&bam(true, false), &bam(true, false)));
+    }
+
+    #[test]
+    fn bam_missing_a_required_qualifier_does_not_connect() {
+        assert!(!can_connect(&bam(false, false), &bam(true, false)));
+        assert!(!can_connect(&bam(true, false), &bam(true, true)));
+        assert!(!can_connect(&bam(false, true), &bam(true, true)));
+    }
+
+    // ---- parsing ----
 
     #[test]
     fn rejects_unknown_format() {

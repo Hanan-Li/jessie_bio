@@ -1,0 +1,11 @@
+{
+  "id": "multiqc",
+  "version": "0.1.0",
+  "class": "batch",
+  "inputs": [
+    { "name": "reports", "type": { "format": "qc_report" }, "cardinality": "per_dataset" }
+  ],
+  "outputs": [
+    { "name": "html", "type": { "format": "report_artifact" }, "cardinality": "per_dataset" }
+  ]
+}
