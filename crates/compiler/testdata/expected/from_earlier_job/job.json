@@ -1,0 +1,40 @@
+{
+  "inputs": [
+    {
+      "name": "a1__out",
+      "cardinality": "per_sample",
+      "type": {
+        "format": "qc_report"
+      },
+      "source": {
+        "from": "job",
+        "job": 1,
+        "node": "a1",
+        "port": "out"
+      }
+    },
+    {
+      "name": "b2__in2",
+      "cardinality": "per_sample",
+      "type": {
+        "format": "qc_report"
+      },
+      "source": {
+        "from": "run",
+        "node": "b2",
+        "port": "in2"
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "b2__out",
+      "node": "b2",
+      "port": "out",
+      "cardinality": "per_sample",
+      "type": {
+        "format": "qc_report"
+      }
+    }
+  ]
+}

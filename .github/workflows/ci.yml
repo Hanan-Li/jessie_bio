@@ -29,6 +29,8 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
 
+  # Kept under its original name so branch protection rules that require
+  # it keep working. It now also checks compiler output end to end.
   nextflow-lint:
     runs-on: ubuntu-latest
     env:
@@ -43,3 +45,8 @@ jobs:
           java-version: "17"
       - run: curl -fsSL https://get.nextflow.io | bash && sudo mv nextflow /usr/local/bin/
       - run: nextflow lint nodes/
+
+      # Compile the test canvas, lint the generated project, stub-run it.
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/stub-run.sh

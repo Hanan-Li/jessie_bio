@@ -8,6 +8,8 @@ publish.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+clap = { workspace = true }
+minijinja = { workspace = true }
 petgraph = { workspace = true }
 protocol = { path = "../protocol" }
 serde = { workspace = true }
