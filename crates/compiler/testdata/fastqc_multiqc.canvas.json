@@ -14,8 +14,8 @@
   ],
   "edges": [
     {
-      "from": { "node": "fastqc_1", "port": "report" },
-      "to": { "node": "multiqc_1", "port": "reports" }
+      "from": { "node": "fastqc_1", "port": "zip" },
+      "to": { "node": "multiqc_1", "port": "multiqc_files" }
     }
   ]
 }

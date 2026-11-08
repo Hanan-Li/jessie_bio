@@ -1,8 +1,8 @@
 //! Node specifications: the curated definition behind each palette entry (DESIGN.md §3.4).
 //!
 //! The canvas only says "use fastqc 0.1.0"; the spec says what that node's
-//! ports and parameters are. Container, parameter schema and resource hints
-//! arrive once codegen needs them.
+//! ports are and how it executes. Parameter schema and resource hints arrive
+//! once codegen needs them.
 
 use std::collections::BTreeMap;
 
@@ -10,14 +10,28 @@ use serde::Deserialize;
 
 use crate::types::{Cardinality, SemanticType};
 
-/// How a node executes (DESIGN.md §5.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExecutionClass {
+/// How a node executes (DESIGN.md §5.1), with what each class needs to run.
+///
+/// In JSON: `{"class": "batch", "module": {...}}` or
+/// `{"class": "analysis", "container": "..."}`. A batch node without a module
+/// cannot be represented.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "class", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Execution {
     /// Compiled into a Nextflow segment.
-    Batch,
+    Batch { module: NextflowModule },
     /// Run directly in a container by the agent, bypassing Nextflow.
-    Analysis,
+    Analysis { container: String },
+}
+
+/// The Nextflow process behind a batch node.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NextflowModule {
+    /// The process name declared in the module, e.g. `FASTQC`.
+    pub process: String,
+    /// The module file, relative to the node's directory, e.g. `main.nf`.
+    pub file: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -35,12 +49,16 @@ pub struct PortSpec {
 pub struct NodeSpec {
     pub id: String,
     pub version: String,
-    pub class: ExecutionClass,
+    pub execution: Execution,
     pub inputs: Vec<PortSpec>,
     pub outputs: Vec<PortSpec>,
 }
 
 impl NodeSpec {
+    pub fn is_analysis(&self) -> bool {
+        matches!(self.execution, Execution::Analysis { .. })
+    }
+
     pub fn input(&self, name: &str) -> Option<&PortSpec> {
         self.inputs.iter().find(|port| port.name == name)
     }
@@ -72,18 +90,11 @@ impl SpecRegistry {
     }
 }
 
-/// Registry with the specs in `testdata/specs/`, shared by tests across modules.
+/// Registry with the repo's real node library (`nodes/`), shared by tests.
 #[cfg(test)]
 pub(crate) fn test_registry() -> SpecRegistry {
-    let sources = [
-        include_str!("../testdata/specs/fastqc.spec.json"),
-        include_str!("../testdata/specs/multiqc.spec.json"),
-    ];
-    let specs = sources
-        .iter()
-        .map(|json| serde_json::from_str(json).unwrap())
-        .collect();
-    SpecRegistry::new(specs)
+    let nodes = crate::library::load_library(&crate::library::repo_library_dir()).unwrap();
+    SpecRegistry::new(nodes.into_iter().map(|node| node.spec).collect())
 }
 
 #[cfg(test)]
@@ -102,12 +113,15 @@ mod tests {
     fn finds_ports_by_name() {
         let registry = test_registry();
         let multiqc = registry.get("multiqc", "0.1.0").unwrap();
-        assert_eq!(multiqc.input("reports").unwrap().ty, SemanticType::QcReport);
-        assert!(
-            multiqc.input("html").is_none(),
-            "html is an output, not an input"
+        assert_eq!(
+            multiqc.input("multiqc_files").unwrap().ty,
+            SemanticType::QcReport
         );
-        assert!(multiqc.output("html").is_some());
+        assert!(
+            multiqc.input("report").is_none(),
+            "report is an output, not an input"
+        );
+        assert!(multiqc.output("report").is_some());
     }
 
     #[test]
@@ -115,19 +129,40 @@ mod tests {
         let json = r#"{
             "id": "fastqc",
             "version": "0.1.0",
-            "class": "batch",
+            "execution": {"class": "batch", "module": {"process": "FASTQC", "file": "main.nf"}},
             "inputs": [
                 {"name": "reads", "type": {"format": "fastq", "paired": true}, "cardinality": "per_sample"}
             ],
             "outputs": [
-                {"name": "report", "type": {"format": "qc_report"}, "cardinality": "per_sample"}
+                {"name": "zip", "type": {"format": "qc_report"}, "cardinality": "per_sample"}
             ]
         }"#;
 
         let spec: NodeSpec = serde_json::from_str(json).unwrap();
 
-        assert_eq!(spec.class, ExecutionClass::Batch);
+        assert!(!spec.is_analysis());
+        assert_eq!(
+            spec.execution,
+            Execution::Batch {
+                module: NextflowModule {
+                    process: "FASTQC".to_string(),
+                    file: "main.nf".to_string(),
+                }
+            }
+        );
         assert_eq!(spec.inputs[0].ty, SemanticType::Fastq { paired: true });
         assert_eq!(spec.outputs[0].cardinality, Cardinality::PerSample);
+    }
+
+    #[test]
+    fn batch_node_requires_a_module() {
+        let json = r#"{
+            "id": "broken",
+            "version": "0.1.0",
+            "execution": {"class": "batch"},
+            "inputs": [],
+            "outputs": []
+        }"#;
+        assert!(serde_json::from_str::<NodeSpec>(json).is_err());
     }
 }

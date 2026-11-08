@@ -28,3 +28,18 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
+
+  nextflow-lint:
+    runs-on: ubuntu-latest
+    env:
+      # Pinned like the Rust toolchain: a new Nextflow release can't change
+      # what CI accepts until we upgrade on purpose.
+      NXF_VER: 26.10.5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - run: curl -fsSL https://get.nextflow.io | bash && sudo mv nextflow /usr/local/bin/
+      - run: nextflow lint nodes/

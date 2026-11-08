@@ -19,6 +19,8 @@ Background from the design conversations (2026-09-14 and 2026-09-27) that isn't 
 - **Segments**: the compiler emits one Nextflow run per maximal connected group of batch nodes, not one per canvas or one per node. This keeps per-sample pipelining inside Nextflow while the per-node cache still works (cached nodes are pruned before codegen).
 - **Multi-machine execution**, in order: native Nextflow executors, then whole-run placement across environments, then segment placement under the "data flows downhill" rule.
 - **P0 is built inside-out** (compiler → agent → API) so the Rust learning curve rises gradually.
+- **Codegen** (2026-11-07): process code is curated, not generated; the compiler emits only wiring. nf-core modules are vendored by hand into `nodes/` at a pinned commit (no nf-core Python tooling). Templates via minijinja with all logic in Rust.
+- **Local executor first** (2026-11-07): David proposed Kubernetes for the first runner agent. Decided against for now: k8s is just a Nextflow executor setting, it needs shared work storage and pod permissions, and target users mostly run Slurm or AWS Batch. Possible later milestone (kind/k3s locally), or for hosting the control plane.
 
 ## Honest market assessment (2026-09-27)
 

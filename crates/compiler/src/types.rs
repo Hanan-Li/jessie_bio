@@ -22,6 +22,8 @@ pub enum SemanticType {
     CountMatrix,
     SampleSheet,
     Genome,
+    /// A standalone HTML report (FastQC, MultiQC), shown embedded in results.
+    HtmlReport,
     /// A rendered result: Vega-Lite spec plus its data (DESIGN.md §3.7).
     ReportArtifact,
 }

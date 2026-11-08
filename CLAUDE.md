@@ -26,4 +26,5 @@ P0 is built inside-out:
 ## Conventions
 
 - Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings` and `cargo test` before calling work done.
+- Run `nextflow lint nodes/` after changing any Nextflow module (Nextflow 26.10.5, Java 17; CI pins the same version).
 - Compiler output is tested with golden files: expected `.nf` output is checked into the repo and diffed in tests.
