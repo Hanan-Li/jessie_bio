@@ -233,14 +233,22 @@ pub(crate) mod testing {
         .unwrap()
     }
 
+    /// Registry of the generic test nodes, with a stand-in module source for
+    /// the batch one so codegen can run.
+    pub(crate) fn generic_registry() -> SpecRegistry {
+        let mut registry = SpecRegistry::new(vec![
+            generic_spec("batch", "batch"),
+            generic_spec("analysis", "analysis"),
+        ]);
+        registry.add_module_source("batch", "0.1.0", "process BATCH {\n}\n");
+        registry
+    }
+
     /// Build a plan from node names and edges. Names starting with `a` are
     /// analysis nodes; all others are batch. Edges go `out` → the first
     /// free input of the target.
     pub(crate) fn plan(nodes: &[&str], edges: &[(&str, &str)]) -> ExecutionPlan {
-        let registry = SpecRegistry::new(vec![
-            generic_spec("batch", "batch"),
-            generic_spec("analysis", "analysis"),
-        ]);
+        let registry = generic_registry();
         let canvas_nodes: Vec<_> = nodes
             .iter()
             .map(|id| {
