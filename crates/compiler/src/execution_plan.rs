@@ -55,12 +55,9 @@ pub struct ExecutionPlan {
     jobs: Vec<Job>,
 }
 
-/// A job's position in `ExecutionPlan::jobs`.
-///
-/// A "newtype": a `usize` wrapped in its own type, so a job id can't be
-/// mixed up with a node index or any other number.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct JobId(pub usize);
+/// A job's position in `ExecutionPlan::jobs`. Defined in `protocol`,
+/// because job ids also appear in job interfaces the agent reads.
+pub use protocol::job::JobId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Job {
@@ -192,15 +189,28 @@ impl ExecutionPlan {
     pub fn jobs(&self) -> &[Job] {
         &self.jobs
     }
+
+    /// The job that runs `node`. Every node is in exactly one job.
+    pub fn job_of(&self, node: NodeIndex) -> JobId {
+        let position = self
+            .jobs
+            .iter()
+            .position(|job| job.nodes().contains(&node))
+            .expect("every node of the plan's graph is in exactly one job");
+        JobId(position)
+    }
 }
 
+/// Plan builders shared by this module's tests and `job_interface`'s.
 #[cfg(test)]
-mod tests {
+pub(crate) mod testing {
+    use std::collections::BTreeMap;
+
     use serde_json::json;
 
-    use super::*;
+    use super::ExecutionPlan;
     use crate::canvas::Canvas;
-    use crate::spec::{NodeSpec, SpecRegistry, test_registry};
+    use crate::spec::{NodeSpec, SpecRegistry};
     use crate::validate::validate;
 
     /// Generic test nodes: two optional inputs, one output, all QC reports
@@ -226,7 +236,7 @@ mod tests {
     /// Build a plan from node names and edges. Names starting with `a` are
     /// analysis nodes; all others are batch. Edges go `out` → the first
     /// free input of the target.
-    fn plan(nodes: &[&str], edges: &[(&str, &str)]) -> ExecutionPlan {
+    pub(crate) fn plan(nodes: &[&str], edges: &[(&str, &str)]) -> ExecutionPlan {
         let registry = SpecRegistry::new(vec![
             generic_spec("batch", "batch"),
             generic_spec("analysis", "analysis"),
@@ -260,13 +270,22 @@ mod tests {
     }
 
     /// Each job's node ids, in plan order, for readable assertions.
-    fn job_ids(plan: &ExecutionPlan) -> Vec<Vec<String>> {
+    pub(crate) fn job_ids(plan: &ExecutionPlan) -> Vec<Vec<String>> {
         let graph = plan.pipeline().graph();
         plan.jobs()
             .iter()
             .map(|job| job.nodes().iter().map(|&n| graph[n].id.clone()).collect())
             .collect()
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::{job_ids, plan};
+    use super::*;
+    use crate::canvas::Canvas;
+    use crate::spec::test_registry;
+    use crate::validate::validate;
 
     /// The guarantees every plan must meet, whatever its shape.
     fn assert_plan_invariants(plan: &ExecutionPlan) {

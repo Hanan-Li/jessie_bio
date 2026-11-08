@@ -19,7 +19,7 @@ pub enum ValidationError {
     DuplicateNodeId(String),
 
     #[error(
-        "node id `{0}` must start with a letter and contain only letters, digits and underscores"
+        "node id `{0}` must start with a letter, contain only letters, digits and underscores, and not contain `__`"
     )]
     InvalidNodeId(String),
 
@@ -165,15 +165,17 @@ pub fn validate(
 }
 
 /// Node ids become part of Nextflow process aliases (`FASTQC as FASTQC_qc_1`),
-/// so they must be valid Nextflow identifiers.
+/// so they must be valid Nextflow identifiers. They also may not contain
+/// `__`, which separates node from port in data names (`qc_1__zip`).
 fn is_valid_node_id(id: &str) -> bool {
     let mut chars = id.chars();
-    match chars.next() {
+    let identifier = match chars.next() {
         Some(first) if first.is_ascii_alphabetic() => {
             chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
         }
         _ => false,
-    }
+    };
+    identifier && !id.contains("__")
 }
 
 #[cfg(test)]
@@ -239,7 +241,12 @@ mod tests {
     #[test]
     fn reports_invalid_node_ids() {
         let canvas = canvas(json!({
-            "nodes": [node("qc 1", "fastqc"), node("1qc", "fastqc"), node("qc_1", "fastqc")],
+            "nodes": [
+                node("qc 1", "fastqc"),
+                node("1qc", "fastqc"),
+                node("qc__1", "fastqc"),
+                node("qc_1", "fastqc"),
+            ],
             "edges": [],
         }));
         let errors = validate(&canvas, &test_registry()).unwrap_err();
@@ -248,6 +255,7 @@ mod tests {
             vec![
                 ValidationError::InvalidNodeId("qc 1".to_string()),
                 ValidationError::InvalidNodeId("1qc".to_string()),
+                ValidationError::InvalidNodeId("qc__1".to_string()),
             ]
         );
     }
