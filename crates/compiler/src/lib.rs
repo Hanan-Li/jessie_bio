@@ -4,6 +4,7 @@
 
 pub mod canvas;
 pub mod execution_plan;
+pub mod library;
 pub mod pipeline_graph;
 pub mod spec;
 pub mod types;

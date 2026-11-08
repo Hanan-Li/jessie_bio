@@ -18,6 +18,11 @@ pub enum ValidationError {
     #[error("more than one node has the id `{0}`")]
     DuplicateNodeId(String),
 
+    #[error(
+        "node id `{0}` must start with a letter and contain only letters, digits and underscores"
+    )]
+    InvalidNodeId(String),
+
     #[error("node `{node}` uses `{spec}` version {version}, which does not exist")]
     UnknownSpec {
         node: String,
@@ -64,6 +69,11 @@ pub fn validate(
         if !seen_ids.insert(node.id.clone()) {
             errors.push(ValidationError::DuplicateNodeId(node.id.clone()));
             continue;
+        }
+        // Still added to the graph below: the id is only a naming problem,
+        // and its edges can be checked as usual.
+        if !is_valid_node_id(&node.id) {
+            errors.push(ValidationError::InvalidNodeId(node.id.clone()));
         }
         let Some(spec) = registry.get(&node.spec, &node.version) else {
             errors.push(ValidationError::UnknownSpec {
@@ -154,6 +164,18 @@ pub fn validate(
     }
 }
 
+/// Node ids become part of Nextflow process aliases (`FASTQC as FASTQC_qc_1`),
+/// so they must be valid Nextflow identifiers.
+fn is_valid_node_id(id: &str) -> bool {
+    let mut chars = id.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() => {
+            chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -215,10 +237,26 @@ mod tests {
     }
 
     #[test]
+    fn reports_invalid_node_ids() {
+        let canvas = canvas(json!({
+            "nodes": [node("qc 1", "fastqc"), node("1qc", "fastqc"), node("qc_1", "fastqc")],
+            "edges": [],
+        }));
+        let errors = validate(&canvas, &test_registry()).unwrap_err();
+        assert_eq!(
+            errors,
+            vec![
+                ValidationError::InvalidNodeId("qc 1".to_string()),
+                ValidationError::InvalidNodeId("1qc".to_string()),
+            ]
+        );
+    }
+
+    #[test]
     fn reports_unknown_spec_and_skips_its_edges() {
         let canvas = canvas(json!({
             "nodes": [node("a", "fastqc"), node("b", "star_align")],
-            "edges": [edge("a", "report", "b", "reads")],
+            "edges": [edge("a", "zip", "b", "reads")],
         }));
         let errors = validate(&canvas, &test_registry()).unwrap_err();
         assert_eq!(
@@ -235,7 +273,7 @@ mod tests {
     fn reports_edge_to_missing_node() {
         let canvas = canvas(json!({
             "nodes": [node("a", "fastqc")],
-            "edges": [edge("a", "report", "ghost", "reports")],
+            "edges": [edge("a", "zip", "ghost", "multiqc_files")],
         }));
         let errors = validate(&canvas, &test_registry()).unwrap_err();
         assert_eq!(
@@ -248,7 +286,7 @@ mod tests {
     fn reports_unknown_ports() {
         let canvas = canvas(json!({
             "nodes": [node("a", "fastqc"), node("b", "multiqc")],
-            "edges": [edge("a", "html", "b", "report")],
+            "edges": [edge("a", "pdf", "b", "report")],
         }));
         let errors = validate(&canvas, &test_registry()).unwrap_err();
         assert_eq!(
@@ -256,7 +294,7 @@ mod tests {
             vec![
                 ValidationError::UnknownOutputPort {
                     node: "a".to_string(),
-                    port: "html".to_string(),
+                    port: "pdf".to_string(),
                 },
                 ValidationError::UnknownInputPort {
                     node: "b".to_string(),
@@ -271,11 +309,11 @@ mod tests {
         // A QC report is not FASTQ.
         let canvas = canvas(json!({
             "nodes": [node("a", "fastqc"), node("b", "fastqc")],
-            "edges": [edge("a", "report", "b", "reads")],
+            "edges": [edge("a", "zip", "b", "reads")],
         }));
         let errors = validate(&canvas, &test_registry()).unwrap_err();
         assert!(
-            matches!(&errors[..], [ValidationError::TypeMismatch { from, .. }] if from == "a.report"),
+            matches!(&errors[..], [ValidationError::TypeMismatch { from, .. }] if from == "a.zip"),
             "{errors:?}"
         );
     }
@@ -285,8 +323,8 @@ mod tests {
         let canvas = canvas(json!({
             "nodes": [node("a", "fastqc"), node("b", "fastqc"), node("m", "multiqc")],
             "edges": [
-                edge("a", "report", "m", "reports"),
-                edge("b", "report", "m", "reports"),
+                edge("a", "zip", "m", "multiqc_files"),
+                edge("b", "zip", "m", "multiqc_files"),
             ],
         }));
         let errors = validate(&canvas, &test_registry()).unwrap_err();
@@ -294,7 +332,7 @@ mod tests {
             errors,
             vec![ValidationError::InputConnectedTwice {
                 node: "m".to_string(),
-                port: "reports".to_string(),
+                port: "multiqc_files".to_string(),
             }]
         );
     }
@@ -305,7 +343,7 @@ mod tests {
         let passthrough: NodeSpec = serde_json::from_value(json!({
             "id": "passthrough",
             "version": "0.1.0",
-            "class": "batch",
+            "execution": { "class": "batch", "module": { "process": "PASSTHROUGH", "file": "main.nf" } },
             "inputs": [{ "name": "in", "type": { "format": "qc_report" }, "cardinality": "per_sample" }],
             "outputs": [{ "name": "out", "type": { "format": "qc_report" }, "cardinality": "per_sample" }],
         }))
@@ -328,7 +366,7 @@ mod tests {
     fn reports_every_error_not_just_the_first() {
         let canvas = canvas(json!({
             "nodes": [node("a", "fastqc"), node("a", "fastqc"), node("x", "nope")],
-            "edges": [edge("a", "report", "ghost", "in")],
+            "edges": [edge("a", "zip", "ghost", "in")],
         }));
         let errors = validate(&canvas, &test_registry()).unwrap_err();
         assert_eq!(errors.len(), 3, "{errors:?}");

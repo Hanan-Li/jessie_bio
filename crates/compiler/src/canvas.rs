@@ -69,7 +69,7 @@ mod tests {
             canvas.edges[0].to,
             PortRef {
                 node: "multiqc_1".to_string(),
-                port: "reports".to_string(),
+                port: "multiqc_files".to_string(),
             }
         );
     }

@@ -41,7 +41,6 @@ use petgraph::unionfind::UnionFind;
 use petgraph::visit::{EdgeRef, IntoEdgeReferences, NodeIndexable};
 
 use crate::pipeline_graph::PipelineGraph;
-use crate::spec::ExecutionClass;
 
 /// The jobs to run for one pipeline, in dependency order.
 ///
@@ -93,7 +92,7 @@ impl Job {
 impl ExecutionPlan {
     pub fn build(pipeline: PipelineGraph) -> ExecutionPlan {
         let graph = pipeline.graph();
-        let is_analysis = |node: NodeIndex| graph[node].spec.class == ExecutionClass::Analysis;
+        let is_analysis = |node: NodeIndex| graph[node].spec.is_analysis();
 
         let node_order =
             toposort(graph, None).expect("a PipelineGraph has no cycles: validation rejects them");
@@ -208,10 +207,16 @@ mod tests {
     /// per sample, so any node can feed any other.
     fn generic_spec(id: &str, class: &str) -> NodeSpec {
         let port = |name: &str| json!({ "name": name, "type": { "format": "qc_report" }, "cardinality": "per_sample" });
+        let execution = match class {
+            "batch" => {
+                json!({ "class": "batch", "module": { "process": "BATCH", "file": "main.nf" } })
+            }
+            _ => json!({ "class": "analysis", "container": "example/analysis:latest" }),
+        };
         serde_json::from_value(json!({
             "id": id,
             "version": "0.1.0",
-            "class": class,
+            "execution": execution,
             "inputs": [port("in1"), port("in2")],
             "outputs": [port("out")],
         }))

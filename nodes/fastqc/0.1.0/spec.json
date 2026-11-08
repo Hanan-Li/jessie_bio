@@ -1,0 +1,15 @@
+{
+  "id": "fastqc",
+  "version": "0.1.0",
+  "execution": {
+    "class": "batch",
+    "module": { "process": "FASTQC", "file": "main.nf" }
+  },
+  "inputs": [
+    { "name": "reads", "type": { "format": "fastq", "paired": true }, "cardinality": "per_sample" }
+  ],
+  "outputs": [
+    { "name": "html", "type": { "format": "html_report" }, "cardinality": "per_sample" },
+    { "name": "zip", "type": { "format": "qc_report" }, "cardinality": "per_sample" }
+  ]
+}

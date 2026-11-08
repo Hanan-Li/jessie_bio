@@ -55,7 +55,7 @@ A React Flow canvas where users drag **nodes** from a palette, connect typed por
 
 Every node port carries a **semantic type**, not "file":
 
-- Format + qualifiers: `FASTQ(paired)`, `BAM(sorted, indexed)`, `VCF`, `QcReport` (raw per-tool QC output that MultiQC aggregates), `CountMatrix`, `SampleSheet`, `Genome`, `ReportArtifact`.
+- Format + qualifiers: `FASTQ(paired)`, `BAM(sorted, indexed)`, `VCF`, `QcReport` (raw per-tool QC output that MultiQC aggregates), `HtmlReport` (a tool's standalone HTML report), `CountMatrix`, `SampleSheet`, `Genome`, `ReportArtifact`.
 - **Cardinality:** `per-sample` vs `per-dataset`. This encodes Nextflow's scatter/gather without exposing channel operators: a per-sample → per-dataset edge is a gather (compiler emits `.collect()`), e.g. MultiQC collecting all samples' QC.
 
 Consequences:
@@ -82,6 +82,16 @@ The canvas is never executed directly. It **compiles to real Nextflow DSL2**: ge
 - Every node's outputs are published and hashed, not just segment-final outputs, so the per-node cache has something to store.
 - Segments are also the unit of placement for multi-environment runs (§5.4).
 
+**Code generation.** The compiler generates only the *wiring*; process code is curated.
+
+- Each node's Nextflow `process` is a hand-curated module in the node library (§3.4), written once and reviewed by people. The compiler emits the `include` lines, channel construction, process calls and output publishing.
+- Each segment has an **interface**: its inputs are run inputs (unconnected input ports, e.g. reads from the samplesheet) or outputs of earlier jobs; its outputs are every node's outputs (all are published and hashed, per above).
+- **Every boundary crossing is a manifest file.** A per-sample port is a CSV with a `sample` column plus file paths, so the sample's `meta` survives the boundary and provenance stays intact; a per-dataset port is a path. Samplesheets, segment inputs and agent-produced output manifests share this one format.
+- The compiler is pure: it returns a `NextflowProject` (a map of path → file text: `main.nf`, the vendored modules, `nextflow.config`, and `segment.json` describing the interface). Callers write it out: a CLI in P0a, the control plane (stored with the run, fetched by the agent at lease time) from P0c.
+- `main.nf` is rendered with minijinja templates. All decisions (aliases, wiring, `.collect()` placement, call order) are made in Rust and passed to the template as plain view structs, so Rust's exhaustive `match` covers them and templates only format.
+- Tests compare generated projects byte-for-byte against expected files in the repo (regenerated with `UPDATE_EXPECTED=1`), and CI runs `nextflow lint` on them.
+- Analysis-job code generation is deferred until the first analysis node exists.
+
 ### 3.4 Node specification
 
 A node is a curated artifact comprising:
@@ -93,7 +103,21 @@ A node is a curated artifact comprising:
 - Resource hints (CPU/memory/disk classes)
 - **Execution class:** `batch` or `analysis` (see §5)
 
-**Authorship:** v1 ships a platform-curated core library defined as YAML + containers in the platform repo. The spec format is designed from day one for third-party authorship; a node-authoring UI/registry for institutional cores is a later phase. Curation quality *is* the product — ~12 excellent nodes beat 40 mediocre ones.
+**Node library.** The core library lives in the platform repo under `nodes/<id>/<version>/`:
+
+```
+nodes/fastqc/0.1.0/
+  spec.json     NodeSpec: ports, execution class, parameters
+  main.nf       Nextflow process (batch nodes)
+  UPSTREAM.md   provenance of vendored code: repo, commit, path, license, local changes
+```
+
+- A version directory is immutable: any change (module code, container) is a new version.
+- Where nf-core has a well-tested module, it is **vendored**: copied from `github.com/nf-core/modules` at a pinned commit (MIT-licensed; notice kept in `UPSTREAM.md`). Local changes are expected and recorded: containers pinned by digest instead of tag, strict-syntax fixes, unused inputs removed.
+- Convention linking spec and module: input ports in declared order are the process's inputs; output port names are its `emit:` names.
+- Node ids on a canvas must be valid Nextflow identifiers, since codegen uses them in process aliases.
+
+**Authorship:** v1 ships a platform-curated core library defined as spec files + containers in the platform repo. The spec format is designed from day one for third-party authorship; a node-authoring UI/registry for institutional cores is a later phase. Curation quality *is* the product — ~12 excellent nodes beat 40 mediocre ones.
 
 ### 3.5 Samplesheet builder
 
@@ -318,7 +342,7 @@ Guiding principle: **buy everything that isn't the product.** The product is the
 **P0 — walking skeleton, built inside-out.** Goal: a hardcoded 2-node canvas runs end-to-end through the real spine (API → queue → agent lease → Nextflow → artifact upload → hash registration → viewable result). Ordered so the Rust learning curve rises gradually (easiest crate first):
 
 - **P0a — compiler core.** Pure Rust, no async/DB: hardcoded canvas JSON → IR → segments → DSL2 text. Golden-file tests; generated code linted by Nextflow in CI.
-- **P0b — agent, local mode.** Runs a compiled segment with Nextflow locally, parses the trace file, hashes and stores outputs. No server.
+- **P0b — agent, local mode.** A plain Linux process that runs a compiled segment with Nextflow's **local executor** + Docker, parses the trace file, hashes and stores outputs. No server. Kubernetes is deliberately not used here: where tasks run is a Nextflow executor setting (§5.4 level 1), so `k8s`, like Slurm and AWS Batch, is a later config option, not part of the agent's architecture.
 - **P0c — control plane.** axum + sqlx + SKIP LOCKED queue; agent switches from local mode to leasing over HTTPS. One GitHub Actions E2E test: Postgres service container + real tiny Nextflow run.
 
 **P1 — MVP: RNA-seq vertical slice, managed tier only.**
