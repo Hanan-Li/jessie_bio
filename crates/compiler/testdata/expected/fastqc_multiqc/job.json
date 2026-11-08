@@ -1,0 +1,46 @@
+{
+  "inputs": [
+    {
+      "name": "fastqc_1__reads",
+      "cardinality": "per_sample",
+      "type": {
+        "format": "fastq",
+        "paired": true
+      },
+      "source": {
+        "from": "run",
+        "node": "fastqc_1",
+        "port": "reads"
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "fastqc_1__html",
+      "node": "fastqc_1",
+      "port": "html",
+      "cardinality": "per_sample",
+      "type": {
+        "format": "html_report"
+      }
+    },
+    {
+      "name": "fastqc_1__zip",
+      "node": "fastqc_1",
+      "port": "zip",
+      "cardinality": "per_sample",
+      "type": {
+        "format": "qc_report"
+      }
+    },
+    {
+      "name": "multiqc_1__report",
+      "node": "multiqc_1",
+      "port": "report",
+      "cardinality": "per_dataset",
+      "type": {
+        "format": "html_report"
+      }
+    }
+  ]
+}

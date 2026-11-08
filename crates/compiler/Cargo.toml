@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+minijinja = { workspace = true }
 petgraph = { workspace = true }
 protocol = { path = "../protocol" }
 serde = { workspace = true }

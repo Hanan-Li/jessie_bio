@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
+use crate::library::LibraryNode;
 use crate::types::{Cardinality, SemanticType};
 
 /// How a node executes (DESIGN.md §5.1), with what each class needs to run.
@@ -68,13 +69,17 @@ impl NodeSpec {
     }
 }
 
-/// All node specs the compiler knows about, looked up by (id, version).
+/// All node specs the compiler knows about, looked up by (id, version),
+/// plus the Nextflow module source of each batch node, which codegen copies
+/// into generated projects.
 #[derive(Debug, Clone, Default)]
 pub struct SpecRegistry {
     specs: BTreeMap<(String, String), NodeSpec>,
+    module_sources: BTreeMap<(String, String), String>,
 }
 
 impl SpecRegistry {
+    /// Specs only: enough to validate and plan, not to generate code.
     pub fn new(specs: Vec<NodeSpec>) -> SpecRegistry {
         let mut registry = SpecRegistry::default();
         for spec in specs {
@@ -85,8 +90,33 @@ impl SpecRegistry {
         registry
     }
 
+    /// Specs and module sources, as loaded from the node library.
+    pub fn from_library(nodes: Vec<LibraryNode>) -> SpecRegistry {
+        let mut registry = SpecRegistry::default();
+        for node in nodes {
+            let key = (node.spec.id.clone(), node.spec.version.clone());
+            if let Some(source) = node.module_source {
+                registry.module_sources.insert(key.clone(), source);
+            }
+            registry.specs.insert(key, node.spec);
+        }
+        registry
+    }
+
+    /// Register a module's source by hand (tests with made-up nodes).
+    pub fn add_module_source(&mut self, id: &str, version: &str, source: &str) {
+        self.module_sources
+            .insert((id.to_string(), version.to_string()), source.to_string());
+    }
+
     pub fn get(&self, id: &str, version: &str) -> Option<&NodeSpec> {
         self.specs.get(&(id.to_string(), version.to_string()))
+    }
+
+    pub fn module_source(&self, id: &str, version: &str) -> Option<&str> {
+        self.module_sources
+            .get(&(id.to_string(), version.to_string()))
+            .map(String::as_str)
     }
 }
 
@@ -94,7 +124,7 @@ impl SpecRegistry {
 #[cfg(test)]
 pub(crate) fn test_registry() -> SpecRegistry {
     let nodes = crate::library::load_library(&crate::library::repo_library_dir()).unwrap();
-    SpecRegistry::new(nodes.into_iter().map(|node| node.spec).collect())
+    SpecRegistry::from_library(nodes)
 }
 
 #[cfg(test)]

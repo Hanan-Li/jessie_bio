@@ -10,12 +10,14 @@ use anyhow::{Context, bail, ensure};
 
 use crate::spec::{Execution, NodeSpec};
 
-/// One node version from the library: its spec and the directory holding
-/// its files (spec, module, provenance).
+/// One node version from the library: its spec, the directory holding its
+/// files, and (for batch nodes) the Nextflow module's source text, which
+/// codegen copies into each generated project.
 #[derive(Debug, Clone)]
 pub struct LibraryNode {
     pub spec: NodeSpec,
     pub dir: PathBuf,
+    pub module_source: Option<String>,
 }
 
 /// Load every node version under `root`, sorted by id then version.
@@ -50,6 +52,7 @@ fn load_node(dir: &Path) -> anyhow::Result<LibraryNode> {
         spec.version
     );
 
+    let mut module_source = None;
     if let Execution::Batch { module } = &spec.execution {
         // Only plain relative paths: a module must live inside its node's
         // directory, never `../elsewhere` or `/etc/...`.
@@ -72,11 +75,13 @@ fn load_node(dir: &Path) -> anyhow::Result<LibraryNode> {
             "{} does not declare `{declaration}`",
             module.file
         );
+        module_source = Some(source);
     }
 
     Ok(LibraryNode {
         spec,
         dir: dir.to_path_buf(),
+        module_source,
     })
 }
 

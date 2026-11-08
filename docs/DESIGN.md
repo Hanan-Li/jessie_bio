@@ -91,7 +91,8 @@ The canvas is never executed directly. It **compiles to real Nextflow DSL2**: ge
 - The job interface and manifest types live in the shared `protocol` crate, with `SemanticType`/`Cardinality`, because the compiler, agent and API all read or write them.
 - The compiler is pure: it returns a `NextflowProject` (a map of path → file text: `main.nf`, the vendored modules, `nextflow.config`, and `job.json` describing the job's interface). Callers write it out: a CLI in P0a, the control plane (stored with the run, fetched by the agent at lease time) from P0c.
 - `main.nf` is rendered with minijinja templates. All decisions (aliases, wiring, `.collect()` placement, call order) are made in Rust and passed to the template as plain view structs, so Rust's exhaustive `match` covers them and templates only format.
-- Tests compare generated projects byte-for-byte against expected files in the repo (regenerated with `UPDATE_EXPECTED=1`), and CI runs `nextflow lint` on them.
+- Outputs are published with Nextflow workflow outputs in copy mode, one directory per data name: per-sample data under `<name>/<sample>/`, per-dataset data under `<name>/`. The agent builds output manifests from that layout. `nextflow.config` also enables the trace file the agent parses.
+- Tests compare generated projects byte-for-byte against expected files in the repo (regenerated with `UPDATE_EXPECTED=1`). Generated projects are also checked with `nextflow lint` and a **stub run** (`-stub-run`, Docker off): the modules' `stub:` blocks create placeholder outputs, which exercises manifests, wiring, gathers and publishing without containers or real data.
 - Analysis-job code generation is deferred until the first analysis node exists.
 
 ### 3.4 Node specification
@@ -116,7 +117,7 @@ nodes/fastqc/0.1.0/
 
 - A version directory is immutable: any change (module code, container) is a new version.
 - Where nf-core has a well-tested module, it is **vendored**: copied from `github.com/nf-core/modules` at a pinned commit (MIT-licensed; notice kept in `UPSTREAM.md`). Local changes are expected and recorded: containers pinned by digest instead of tag, strict-syntax fixes, unused inputs removed.
-- Convention linking spec and module: input ports in declared order are the process's inputs; output port names are its `emit:` names.
+- Convention linking spec and module: input ports in declared order are the process's inputs; output port names are its `emit:` names. Every port's process input and output is a `tuple val(meta), path(...)` (the nf-core convention), per-dataset ones included.
 - Node ids on a canvas must be valid Nextflow identifiers, since codegen uses them in process aliases, and may not contain `__`, which separates node from port in data names.
 
 **Authorship:** v1 ships a platform-curated core library defined as spec files + containers in the platform repo. The spec format is designed from day one for third-party authorship; a node-authoring UI/registry for institutional cores is a later phase. Curation quality *is* the product — ~12 excellent nodes beat 40 mediocre ones.
