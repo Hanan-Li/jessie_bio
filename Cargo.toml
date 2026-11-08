@@ -15,6 +15,7 @@ publish = false
 # `serde = { workspace = true }`.
 [workspace.dependencies]
 anyhow = "1"
+clap = { version = "4", features = ["derive"] }
 csv = "1"
 # `serde` lets templates receive any Serialize value.
 minijinja = { version = "3", features = ["serde"] }

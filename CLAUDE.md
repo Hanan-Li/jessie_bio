@@ -19,7 +19,7 @@ A no-code, scientist-focused bioinformatics platform: a visual pipeline builder 
 ## Roadmap position
 
 P0 is built inside-out:
-1. **P0a — compiler core** (current): canvas JSON → IR → segments → DSL2 text, with golden-file tests.
+1. **P0a — compiler core** (current; codegen and CLI done, first real run with Docker next): canvas JSON → IR → segments → DSL2 text, with golden-file tests.
 2. **P0b — agent in local mode**: runs a segment with Nextflow, parses the trace file, hashes outputs.
 3. **P0c — control plane**: axum + sqlx + queue; GitHub Actions end-to-end test with Postgres and a real Nextflow run.
 
@@ -27,4 +27,5 @@ P0 is built inside-out:
 
 - Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings` and `cargo test` before calling work done.
 - Run `nextflow lint nodes/` after changing any Nextflow module (Nextflow 26.10.5, Java 17; CI pins the same version).
+- Run `scripts/stub-run.sh` after changing codegen or a module: it compiles the test canvas, lints the generated project and stub-runs it (no containers).
 - Compiler output is tested with golden files: expected `.nf` output is checked into the repo and diffed in tests.
