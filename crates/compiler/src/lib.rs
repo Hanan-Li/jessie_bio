@@ -3,6 +3,7 @@
 //! P0a skeleton: the real pipeline stages arrive as we build them.
 
 pub mod canvas;
+pub mod execution_plan;
 pub mod pipeline_graph;
 pub mod spec;
 pub mod types;

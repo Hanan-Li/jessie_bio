@@ -72,8 +72,10 @@ The canvas is never executed directly. It **compiles to real Nextflow DSL2**: ge
 - Compilation validates the full graph (types, required inputs, parameter constraints) before any compute is touched.
 - Generated code targets Nextflow's **strict syntax** (25.04+) so output can be linted by Nextflow itself in CI.
 
-**Segmentation.** A canvas is not compiled into one Nextflow run, nor one run per node. The compiler partitions it into **segments** — maximal connected subgraphs of batch nodes — and each segment becomes one Nextflow run. Boundaries fall only where they are needed anyway: at analysis nodes (which bypass Nextflow) and at cache hits.
+**Segmentation.** A canvas is not compiled into one Nextflow run, nor one run per node. The compiler partitions it into **segments** — connected groups of batch nodes — and each segment becomes one Nextflow run. Boundaries fall only where they are needed anyway: at analysis nodes (which bypass Nextflow) and at cache hits.
 
+- Segments must be **convex**: no path may leave a segment and re-enter it. Without this, `A → B` plus `A → X(analysis) → B` would put A and B in one segment that must run both before and after X.
+- Rule: each node's *analysis depth* is the largest number of analysis nodes on any path into it. Batch nodes joined by an edge share a segment only when their depths are equal. This is provably convex but conservative: it can split a segment that could safely stay whole (an independent analysis node feeding the middle of a batch chain), costing an extra barrier, never correctness.
 - Within a segment, Nextflow does what it is best at: scatter/gather and per-sample pipelining (sample 1 aligns while sample 24 is still trimming).
 - Across segments, the control-plane scheduler orchestrates. Every boundary is a barrier and a materialization point, so boundaries are kept to a minimum.
 - **Cache pruning before codegen:** cached nodes are removed from the graph and their stored outputs are injected as ordinary segment inputs. The cache works per node while execution stays per segment.
