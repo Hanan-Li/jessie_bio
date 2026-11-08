@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 petgraph = { workspace = true }
+protocol = { path = "../protocol" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

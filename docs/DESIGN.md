@@ -86,8 +86,10 @@ The canvas is never executed directly. It **compiles to real Nextflow DSL2**: ge
 
 - Each node's Nextflow `process` is a hand-curated module in the node library (§3.4), written once and reviewed by people. The compiler emits the `include` lines, channel construction, process calls and output publishing.
 - Each segment has an **interface**: its inputs are run inputs (unconnected input ports, e.g. reads from the samplesheet) or outputs of earlier jobs; its outputs are every node's outputs (all are published and hashed, per above).
-- **Every boundary crossing is a manifest file.** A per-sample port is a CSV with a `sample` column plus file paths, so the sample's `meta` survives the boundary and provenance stays intact; a per-dataset port is a path. Samplesheets, segment inputs and agent-produced output manifests share this one format.
-- The compiler is pure: it returns a `NextflowProject` (a map of path → file text: `main.nf`, the vendored modules, `nextflow.config`, and `segment.json` describing the interface). Callers write it out: a CLI in P0a, the control plane (stored with the run, fetched by the agent at lease time) from P0c.
+- **Every boundary crossing is a manifest file**, a CSV the generated code reads with `splitCsv`. Per-sample: columns `sample,path`, one row per file (a paired sample has two rows, R1 then R2), so the sample's `meta` survives the boundary and provenance stays intact. Per-dataset: a single `path` column. Samplesheets, job inputs and agent-produced output manifests share this one format.
+- **Every piece of data in a run has one name**, `<node>__<port>` (e.g. `fastqc_1__zip`): the job output that produces it, the job input that receives it, and the Nextflow `params.<name>` pointing at its manifest. A job input's cardinality is the *producer's*; any gather happens inside the consuming job, after the manifest is read.
+- The job interface and manifest types live in the shared `protocol` crate, with `SemanticType`/`Cardinality`, because the compiler, agent and API all read or write them.
+- The compiler is pure: it returns a `NextflowProject` (a map of path → file text: `main.nf`, the vendored modules, `nextflow.config`, and `job.json` describing the job's interface). Callers write it out: a CLI in P0a, the control plane (stored with the run, fetched by the agent at lease time) from P0c.
 - `main.nf` is rendered with minijinja templates. All decisions (aliases, wiring, `.collect()` placement, call order) are made in Rust and passed to the template as plain view structs, so Rust's exhaustive `match` covers them and templates only format.
 - Tests compare generated projects byte-for-byte against expected files in the repo (regenerated with `UPDATE_EXPECTED=1`), and CI runs `nextflow lint` on them.
 - Analysis-job code generation is deferred until the first analysis node exists.
@@ -115,7 +117,7 @@ nodes/fastqc/0.1.0/
 - A version directory is immutable: any change (module code, container) is a new version.
 - Where nf-core has a well-tested module, it is **vendored**: copied from `github.com/nf-core/modules` at a pinned commit (MIT-licensed; notice kept in `UPSTREAM.md`). Local changes are expected and recorded: containers pinned by digest instead of tag, strict-syntax fixes, unused inputs removed.
 - Convention linking spec and module: input ports in declared order are the process's inputs; output port names are its `emit:` names.
-- Node ids on a canvas must be valid Nextflow identifiers, since codegen uses them in process aliases.
+- Node ids on a canvas must be valid Nextflow identifiers, since codegen uses them in process aliases, and may not contain `__`, which separates node from port in data names.
 
 **Authorship:** v1 ships a platform-curated core library defined as spec files + containers in the platform repo. The spec format is designed from day one for third-party authorship; a node-authoring UI/registry for institutional cores is a later phase. Curation quality *is* the product — ~12 excellent nodes beat 40 mediocre ones.
 
