@@ -24,6 +24,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 thiserror = "2"
+# Only the parts the agent uses: the multi-threaded runtime, #[tokio::main],
+# child processes, files, timers and Ctrl-C.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "time", "signal", "io-util"] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

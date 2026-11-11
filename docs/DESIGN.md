@@ -185,6 +185,21 @@ Agent responsibilities:
 
 Agents authenticate with compute-environment-scoped tokens against a separate `/api/agent/*` surface (§8.3). The agent is a **Rust static binary** sharing a protocol-types crate with the API. The binary itself has no dependencies, but hosts running batch nodes also need a JVM + Nextflow (Nextflow is Groovy/Java, Java 17+). The agent either uses the site install (e.g. `module load nextflow` on HPC) or bootstraps and caches a pinned JRE + Nextflow version on first run — pinning the version per compute environment also serves reproducibility. Analysis-class nodes never touch the JVM.
 
+**Local mode (P0b).** Before it talks to any server, the agent runs one compiled job from disk: `agent run <project> --input <name>=<manifest> ... --run-dir <dir>`. P0c replaces only where jobs come from (a lease over HTTPS) and where results go (the API); the middle stays the same.
+
+1. **Preflight**: Java 17+, Nextflow at the pinned version (enforced with `NXF_VER`), Docker reachable without `sudo` (skipped for stub runs).
+2. **Stage**: read `job.json`; check every input has exactly one manifest of the right shape and every file it lists exists; write normalized copies (absolute paths) into the run directory. The project directory is never modified, so one compiled project can be run many times.
+3. **Run**: `nextflow run` as a child process from the run directory, both output streams drained concurrently into log files; Ctrl-C or a timeout sends SIGTERM (Nextflow stops its containers) and SIGKILL after a grace period.
+4. **Parse** `trace.tsv` into typed task records.
+5. **Collect**: walk `results/<name>/<sample>/`, hash every file, write one output manifest per job output.
+6. **Report**: `result.json` (a `protocol` type): status, tasks, outputs with hashes and sizes. In P0c this becomes the body of the agent's "job finished" call.
+
+Run directory: `inputs/` (staged manifests), `work/` (Nextflow work dir), `results/`, `logs/`, `trace.tsv`, `result.json`.
+
+Failures are typed, because each kind gets a different response: the environment is wrong (fix the host), the inputs are wrong (fix the run request), a task failed (tell the scientist), the run was cancelled or timed out, or the agent itself broke (alert us).
+
+Hashes are **self-describing**: `sha256:<hex>`, like container digests. The algorithm is an enum with one variant today; adding another (e.g. BLAKE3 for very large files) leaves old records readable.
+
 ### 4.2 Deployment tiers (sovereignty model)
 
 Same UI, same nodes, same everything — a workspace differs only in *where its data plane lives*:
@@ -385,3 +400,4 @@ Guiding principle: **buy everything that isn't the product.** The product is the
 - Metadata field-level encryption design for sovereign tier
 - Multi-cloud (GCP) support order
 - Node marketplace / cross-workspace template sharing
+- Protocol versioning once agents and the control plane are deployed separately: an older agent will read `job.json` written by a newer compiler. Likely protobuf-style rules (ignore unknown fields, only add fields with defaults, a format version for breaking changes). Today `JobInterface` uses `deny_unknown_fields`, which would make old agents reject every new job.
