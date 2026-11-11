@@ -102,7 +102,7 @@ A node is a curated artifact comprising:
 - Container image (pinned by digest)
 - Wrapped nf-core module/subworkflow or custom script
 - Typed port declarations (inputs/outputs with semantic types + cardinality)
-- Parameter schema → auto-rendered form (defaults, units, ranges, scientist-grade help text)
+- Parameter schema → auto-rendered form (defaults, units, ranges, scientist-grade help text) — not implemented yet; until specs declare parameters and codegen passes them on, validation rejects any `params` on a canvas node rather than silently ignoring them
 - Resource hints (CPU/memory/disk classes)
 - **Execution class:** `batch` or `analysis` (see §5)
 

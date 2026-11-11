@@ -64,7 +64,6 @@ mod tests {
 
         assert_eq!(canvas.nodes.len(), 2);
         assert_eq!(canvas.nodes[0].spec, "fastqc");
-        assert_eq!(canvas.nodes[1].params["title"], "My first QC report");
         assert_eq!(
             canvas.edges[0].to,
             PortRef {
@@ -72,6 +71,15 @@ mod tests {
                 port: "multiqc_files".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn parses_params() {
+        // Parsing accepts parameters; validation decides whether they're allowed.
+        let json = r#"{"nodes": [{"id": "a", "spec": "s", "version": "1",
+                                   "params": {"title": "My report"}}], "edges": []}"#;
+        let canvas = Canvas::from_json(json).unwrap();
+        assert_eq!(canvas.nodes[0].params["title"], "My report");
     }
 
     #[test]
