@@ -194,7 +194,12 @@ Agents authenticate with compute-environment-scoped tokens against a separate `/
 5. **Collect**: walk `results/<name>/<sample>/`, hash every file, write one output manifest per job output.
 6. **Report**: `result.json` (a `protocol` type): status, tasks, outputs with hashes and sizes. In P0c this becomes the body of the agent's "job finished" call.
 
-Run directory: `inputs/` (staged manifests), `work/` (Nextflow work dir), `results/`, `logs/`, `trace.tsv`, `result.json`.
+Run directory: `inputs/` (staged manifests), `work/` (Nextflow work dir), `results/`, `logs/`, `trace.tsv`, `outputs/` (output manifests), `result.json`.
+
+- The trace is written with `raw = true` (times in milliseconds) and parsed by column name, never position.
+- Outputs are collected only when the job succeeded, so a partial result is never mistaken for a full one. A failed job still records every task, which separates "a task failed on its data" (a failed task, with the tool's own error in its log) from "Nextflow or the pipeline failed" (no failed task).
+- Output manifests use the same CSV format as input manifests, so one job's outputs feed the next job directly.
+- Directory outputs (e.g. MultiQC's `multiqc_data/`) aren't collected yet; none of today's ports is a directory.
 
 Generated configs run task containers as the calling user (`docker.runOptions = '-u $(id -u):$(id -g)'`); with Docker's default of root, every file in `work/` belongs to root and the agent's user can't clean up.
 

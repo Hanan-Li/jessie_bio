@@ -46,10 +46,19 @@ for file in \
         exit 1
     fi
 done
-for file in trace.tsv logs/stdout.log logs/stderr.log; do
+for file in trace.tsv logs/stdout.log logs/stderr.log result.json outputs/fastqc_1__zip.csv; do
     if [ ! -f "$work/run/$file" ]; then
         echo "missing run file: $file" >&2
         exit 1
     fi
 done
+
+echo "== check result.json"
+result="$work/run/result.json"
+grep -q '"status": "succeeded"' "$result" || { echo "result.json: job did not succeed" >&2; exit 1; }
+digests=$(grep -c '"digest": "sha256:' "$result")
+if [ "$digests" -ne 5 ]; then
+    echo "result.json: expected 5 hashed output files, found $digests" >&2
+    exit 1
+fi
 echo "stub run OK"

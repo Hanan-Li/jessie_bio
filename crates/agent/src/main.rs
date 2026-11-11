@@ -14,15 +14,21 @@
 //! - 5: the job hit its time limit and was stopped
 //! - 130: the job was cancelled (Ctrl-C), the shell convention for SIGINT
 
+mod collect;
+mod hashing;
 mod preflight;
 mod run;
 mod stage;
+mod trace;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
+use anyhow::Context;
 use clap::{Parser, Subcommand};
+use protocol::digest::HashAlgorithm;
+use protocol::result::{JobResult, JobStatus, TaskStatus};
 
 use crate::run::{Outcome, StopReason};
 use crate::stage::{InputArg, StagedRun};
@@ -81,6 +87,9 @@ enum Command {
         /// Stop the job after this many seconds.
         #[arg(long)]
         timeout_secs: Option<u64>,
+        /// Hash algorithm for outputs.
+        #[arg(long, default_value = "sha256", value_parser = |text: &str| text.parse::<HashAlgorithm>())]
+        hash: HashAlgorithm,
     },
 }
 
@@ -112,6 +121,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             run_dir,
             stub,
             timeout_secs,
+            hash,
         } => {
             let staged = match check_and_stage(&project, &inputs, &run_dir, stub).await {
                 Ok(staged) => staged,
@@ -127,7 +137,8 @@ async fn main() -> anyhow::Result<ExitCode> {
             };
             let command = run::nextflow_command(&staged, stub);
             let outcome = run::supervise(command, &staged.logs_dir(), true, stop, GRACE).await?;
-            Ok(report(outcome, &staged))
+            let result = finish(outcome, &staged, hash).await?;
+            Ok(report(outcome, &staged, &result))
         }
     }
 }
@@ -158,14 +169,82 @@ async fn check_and_stage(
     }
 }
 
+/// After Nextflow ends: parse the trace, collect outputs (only if the job
+/// succeeded), and write `result.json`.
+async fn finish(
+    outcome: Outcome,
+    staged: &StagedRun,
+    algorithm: HashAlgorithm,
+) -> anyhow::Result<JobResult> {
+    let status = match outcome {
+        Outcome::Exited { code: Some(0), .. } => JobStatus::Succeeded,
+        Outcome::Exited { code, .. } => JobStatus::Failed { exit_code: code },
+        Outcome::Stopped {
+            reason: StopReason::TimedOut,
+            ..
+        } => JobStatus::TimedOut,
+        Outcome::Stopped {
+            reason: StopReason::Cancelled,
+            ..
+        } => JobStatus::Cancelled,
+    };
+
+    // No trace file means Nextflow stopped before starting any task.
+    let trace_path = staged.run_dir.join("trace.tsv");
+    let tasks = match tokio::fs::read_to_string(&trace_path).await {
+        Ok(text) => trace::parse(&text).context("parsing trace.tsv")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error).context("reading trace.tsv"),
+    };
+
+    let outputs = if status == JobStatus::Succeeded {
+        collect::collect(staged, algorithm).await?
+    } else {
+        Vec::new()
+    };
+
+    let result = JobResult {
+        status,
+        tasks,
+        outputs,
+    };
+    let mut json = serde_json::to_string_pretty(&result)?;
+    json.push('\n');
+    tokio::fs::write(staged.run_dir.join("result.json"), json).await?;
+    Ok(result)
+}
+
 /// Say how the run ended, and pick the exit code.
-fn report(outcome: Outcome, staged: &StagedRun) -> ExitCode {
+fn report(outcome: Outcome, staged: &StagedRun, result: &JobResult) -> ExitCode {
     let logs = staged.logs_dir();
+    let count = |status: TaskStatus| result.tasks.iter().filter(|t| t.status == status).count();
+    println!(
+        "tasks: {} completed, {} cached, {} failed, {} aborted",
+        count(TaskStatus::Completed),
+        count(TaskStatus::Cached),
+        count(TaskStatus::Failed),
+        count(TaskStatus::Aborted)
+    );
+    for task in result
+        .tasks
+        .iter()
+        .filter(|t| t.status == TaskStatus::Failed)
+    {
+        let exit = task
+            .exit_code
+            .map_or("?".to_string(), |code| code.to_string());
+        eprintln!("  failed: {} (exit {exit})", task.name);
+    }
+    println!("result: {}", staged.run_dir.join("result.json").display());
     match outcome {
         Outcome::Exited { code: Some(0), .. } => {
+            let files: Vec<_> = result.outputs.iter().flat_map(|o| &o.files).collect();
+            let bytes: u64 = files.iter().map(|f| f.size).sum();
             println!(
-                "job finished; results in {}",
-                staged.results_dir().display()
+                "job finished: {} outputs, {} files ({bytes} bytes) hashed; manifests in {}",
+                result.outputs.len(),
+                files.len(),
+                staged.run_dir.join("outputs").display()
             );
             ExitCode::SUCCESS
         }
