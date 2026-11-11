@@ -1,0 +1,23 @@
+[package]
+name = "agent"
+description = "Runner agent: runs compiled jobs with Nextflow and reports what happened."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Depends on `protocol`, never on `compiler`: the agent is installed on
+# machines we don't control (HPC head nodes) and should stay small.
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+protocol = { path = "../protocol" }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
