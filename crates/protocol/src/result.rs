@@ -18,6 +18,10 @@ pub struct JobResult {
     /// Every job output with its files. Collected only when the job
     /// succeeded, so a partial result is never mistaken for a full one.
     pub outputs: Vec<OutputResult>,
+    /// Problems that didn't stop the agent from reporting, e.g. a trace
+    /// file it couldn't parse (then `tasks` is empty).
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +35,9 @@ pub enum JobStatus {
     },
     TimedOut,
     Cancelled,
+    /// The agent was shut down while the job ran. Not the job's fault:
+    /// it should be retried.
+    Interrupted,
 }
 
 /// Nextflow's final status for a task.
@@ -122,6 +129,7 @@ mod tests {
                     digest: Digest::from_bytes(HashAlgorithm::Sha256, &[0; 32]).unwrap(),
                 }],
             }],
+            warnings: vec![],
         };
 
         let json = serde_json::to_value(&result).unwrap();

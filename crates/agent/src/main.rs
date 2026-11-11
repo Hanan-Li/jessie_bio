@@ -13,6 +13,11 @@
 //! - 4: the job ran and failed (Nextflow exited non-zero)
 //! - 5: the job hit its time limit and was stopped
 //! - 130: the job was cancelled (Ctrl-C), the shell convention for SIGINT
+//! - 143: the agent was shut down (SIGTERM) mid-job; the job should be
+//!   retried. 128 + 15, the shell convention for SIGTERM.
+//!
+//! Stopping: the first Ctrl-C or SIGTERM asks Nextflow to stop and waits
+//! up to a grace period; a second one kills it at once.
 
 mod collect;
 mod hashing;
@@ -29,6 +34,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use protocol::digest::HashAlgorithm;
 use protocol::result::{JobResult, JobStatus, TaskStatus};
+use tokio::signal::unix::{SignalKind, signal};
 
 use crate::run::{Outcome, StopReason};
 use crate::stage::{InputArg, StagedRun};
@@ -38,6 +44,7 @@ const INPUTS_FAILED: u8 = 3;
 const JOB_FAILED: u8 = 4;
 const TIMED_OUT: u8 = 5;
 const CANCELLED: u8 = 130;
+const INTERRUPTED: u8 = 143;
 
 /// How long Nextflow gets to shut down cleanly after SIGTERM.
 const GRACE: Duration = Duration::from_secs(60);
@@ -128,18 +135,45 @@ async fn main() -> anyhow::Result<ExitCode> {
                 Err(code) => return Ok(code),
             };
             let limit = timeout_secs.map(Duration::from_secs);
-            // Stop on Ctrl-C or the time limit, whichever comes first.
+            // Stop on Ctrl-C, SIGTERM or the time limit, whichever comes first.
             let stop = async {
                 tokio::select! {
-                    _ = tokio::signal::ctrl_c() => StopReason::Cancelled,
+                    reason = next_stop_signal() => reason,
                     _ = run::sleep_or_forever(limit) => StopReason::TimedOut,
                 }
             };
+            // Once stopping, another signal means "now".
+            let force = async {
+                next_stop_signal().await;
+            };
             let command = run::nextflow_command(&staged, stub);
-            let outcome = run::supervise(command, &staged.logs_dir(), true, stop, GRACE).await?;
+            let outcome =
+                run::supervise(command, &staged.logs_dir(), true, stop, force, GRACE).await?;
             let result = finish(outcome, &staged, hash).await?;
             Ok(report(outcome, &staged, &result))
         }
+    }
+}
+
+/// Waits for the next Ctrl-C (SIGINT) or SIGTERM to reach the agent.
+///
+/// An `async fn` body runs only when first polled, so each call starts
+/// listening at that moment. That's why `force` above only reacts to a
+/// signal *after* the one that triggered `stop`: it isn't polled until
+/// stopping has begun.
+async fn next_stop_signal() -> StopReason {
+    let mut terminate = match signal(SignalKind::terminate()) {
+        Ok(terminate) => terminate,
+        Err(error) => {
+            // Without a SIGTERM handler we can still honour Ctrl-C.
+            eprintln!("warning: cannot listen for SIGTERM: {error}");
+            let _ = tokio::signal::ctrl_c().await;
+            return StopReason::Cancelled;
+        }
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => StopReason::Cancelled,
+        _ = terminate.recv() => StopReason::Terminated,
     }
 }
 
@@ -187,12 +221,22 @@ async fn finish(
             reason: StopReason::Cancelled,
             ..
         } => JobStatus::Cancelled,
+        Outcome::Stopped {
+            reason: StopReason::Terminated,
+            ..
+        } => JobStatus::Interrupted,
     };
 
-    // No trace file means Nextflow stopped before starting any task.
+    // No trace file means Nextflow stopped before starting any task. A
+    // trace we can't parse is reported as a warning rather than an error:
+    // the job's status and outputs are still worth recording.
+    let mut warnings = Vec::new();
     let trace_path = staged.run_dir.join("trace.tsv");
     let tasks = match tokio::fs::read_to_string(&trace_path).await {
-        Ok(text) => trace::parse(&text).context("parsing trace.tsv")?,
+        Ok(text) => trace::parse(&text).unwrap_or_else(|error| {
+            warnings.push(format!("could not parse trace.tsv: {error:#}"));
+            Vec::new()
+        }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(error).context("reading trace.tsv"),
     };
@@ -207,6 +251,7 @@ async fn finish(
         status,
         tasks,
         outputs,
+        warnings,
     };
     let mut json = serde_json::to_string_pretty(&result)?;
     json.push('\n');
@@ -235,6 +280,9 @@ fn report(outcome: Outcome, staged: &StagedRun, result: &JobResult) -> ExitCode 
             .map_or("?".to_string(), |code| code.to_string());
         eprintln!("  failed: {} (exit {exit})", task.name);
     }
+    for warning in &result.warnings {
+        eprintln!("warning: {warning}");
+    }
     println!("result: {}", staged.run_dir.join("result.json").display());
     match outcome {
         Outcome::Exited { code: Some(0), .. } => {
@@ -262,7 +310,7 @@ fn report(outcome: Outcome, staged: &StagedRun, result: &JobResult) -> ExitCode 
         }
         Outcome::Stopped { reason, forced } => {
             let how = if forced {
-                "killed after ignoring SIGTERM (task containers may still be running)"
+                "force-killed (task containers may still be running)"
             } else {
                 "stopped cleanly"
             };
@@ -274,6 +322,10 @@ fn report(outcome: Outcome, staged: &StagedRun, result: &JobResult) -> ExitCode 
                 StopReason::Cancelled => {
                     eprintln!("job cancelled: {how}");
                     ExitCode::from(CANCELLED)
+                }
+                StopReason::Terminated => {
+                    eprintln!("agent shut down; job interrupted ({how}), retry it");
+                    ExitCode::from(INTERRUPTED)
                 }
             }
         }
@@ -298,5 +350,47 @@ async fn check(need_docker: bool) -> ExitCode {
             }
             ExitCode::from(ENVIRONMENT_FAILED)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use protocol::job::JobInterface;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn an_unparseable_trace_still_produces_a_result() {
+        let run = tempfile::tempdir().unwrap();
+        std::fs::write(run.path().join("trace.tsv"), "not\ta trace\n").unwrap();
+        let staged = StagedRun {
+            project: run.path().join("project"),
+            run_dir: run.path().to_path_buf(),
+            interface: JobInterface {
+                inputs: vec![],
+                outputs: vec![],
+            },
+            inputs: BTreeMap::new(),
+        };
+        let outcome = Outcome::Exited {
+            code: Some(0),
+            signal: None,
+        };
+
+        let result = finish(outcome, &staged, HashAlgorithm::Sha256)
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, JobStatus::Succeeded);
+        assert!(result.tasks.is_empty());
+        assert!(
+            result.warnings[0].contains("could not parse trace.tsv"),
+            "{:?}",
+            result.warnings
+        );
+        let written = std::fs::read_to_string(run.path().join("result.json")).unwrap();
+        assert!(written.contains("could not parse trace.tsv"));
     }
 }
