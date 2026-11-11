@@ -19,8 +19,8 @@ A no-code, scientist-focused bioinformatics platform: a visual pipeline builder 
 ## Roadmap position
 
 P0 is built inside-out:
-1. **P0a — compiler core** (current; codegen and CLI done, first real run with Docker next): canvas JSON → IR → segments → DSL2 text, with golden-file tests.
-2. **P0b — agent in local mode**: runs a segment with Nextflow, parses the trace file, hashes outputs.
+1. **P0a — compiler core** (done): canvas JSON → IR → segments → DSL2 text, with golden-file tests; `compiler` CLI.
+2. **P0b — agent in local mode** (done for batch jobs): `agent run` stages, runs and supervises Nextflow, parses the trace, hashes outputs, writes output manifests and `result.json`.
 3. **P0c — control plane**: axum + sqlx + queue; GitHub Actions end-to-end test with Postgres and a real Nextflow run.
 
 ## Conventions
