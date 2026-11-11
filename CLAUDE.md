@@ -1,6 +1,10 @@
 # Jessie's Bioinformatics Platform
 
-A no-code, scientist-focused bioinformatics platform: a visual pipeline builder whose canvas compiles to Nextflow DSL2, a data platform with provenance, and hybrid cloud/on-prem execution through runner agents. The full design is in `docs/DESIGN.md`. Read it before making architectural changes, and update it when a design decision changes.
+A no-code, scientist-focused bioinformatics platform: a visual pipeline builder whose canvas compiles to Nextflow DSL2, a data platform with provenance, and hybrid cloud/on-prem execution through runner agents.
+
+- `docs/DESIGN.md`: the design. Read it before making architectural changes, and update it when a design decision changes. Known gaps are listed in §12.
+- `docs/CONTEXT.md`: why decisions were made, the progress log, and the development environment.
+- `README.md`: how to build, check and run things.
 
 ## Goals and working style
 
@@ -11,7 +15,12 @@ A no-code, scientist-focused bioinformatics platform: a visual pipeline builder 
 
 ## Stack
 
-- Backend: Rust, one Cargo workspace (`crates/`). Parts: compiler (serde, petgraph, minijinja), API (axum + sqlx + Postgres), agent (tokio static binary), shared protocol/types crates.
+- Backend: Rust 1.98 (pinned in `rust-toolchain.toml`), one Cargo workspace:
+  - `crates/compiler`: canvas → validated graph → jobs → Nextflow projects, plus the `compiler` CLI (serde, petgraph, minijinja, clap).
+  - `crates/agent`: runs a compiled job and records the result, the `agent` CLI (tokio, nix, sha2, clap). Depends on `protocol`, never on `compiler`.
+  - `crates/protocol`: formats that cross process boundaries: `job.json`, manifests, digests, `result.json`, port types (serde, csv).
+  - `crates/api` (P0c, not started): axum + sqlx + Postgres.
+- Node library: `nodes/<id>/<version>/` (spec.json, vendored nf-core module, UPSTREAM.md).
 - Frontend (later): Next.js + React Flow.
 - Workflow engine: Nextflow DSL2. Generated code targets strict syntax.
 - Job queue: Postgres `FOR UPDATE SKIP LOCKED`, hand-rolled.
@@ -19,13 +28,16 @@ A no-code, scientist-focused bioinformatics platform: a visual pipeline builder 
 ## Roadmap position
 
 P0 is built inside-out:
-1. **P0a — compiler core** (done): canvas JSON → IR → segments → DSL2 text, with golden-file tests; `compiler` CLI.
-2. **P0b — agent in local mode** (done for batch jobs): `agent run` stages, runs and supervises Nextflow, parses the trace, hashes outputs, writes output manifests and `result.json`.
-3. **P0c — control plane**: axum + sqlx + queue; GitHub Actions end-to-end test with Postgres and a real Nextflow run.
+1. **P0a — compiler core** (done): canvas JSON → `PipelineGraph` (the IR) → segments → DSL2 text, with golden-file tests; `compiler` CLI.
+2. **P0b — agent in local mode** (done for batch jobs): `agent run` stages, runs and supervises Nextflow (clean stop on Ctrl-C, SIGTERM or a time limit), parses the trace, hashes outputs, writes output manifests and `result.json`.
+3. **P0c — control plane** (next; start with a design walkthrough): axum + sqlx + queue; the agent leases jobs over HTTPS; GitHub Actions end-to-end test with Postgres and a real Nextflow run.
 
 ## Conventions
 
 - Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings` and `cargo test` before calling work done.
 - Run `nextflow lint nodes/` after changing any Nextflow module (Nextflow 26.10.5, Java 17; CI pins the same version).
 - Run `scripts/stub-run.sh` after changing codegen or a module: it compiles the test canvas, lints the generated project and stub-runs it (no containers).
-- Compiler output is tested with golden files: expected `.nf` output is checked into the repo and diffed in tests.
+- Compiler output is tested with golden files: expected output is checked into `crates/compiler/testdata/expected/` and diffed in tests. After an intended change, regenerate with `UPDATE_EXPECTED=1 cargo test` and review the diff.
+- Check that a new test can fail: break the code it guards, confirm the test fails, restore.
+- Verify behaviour against real tools (Nextflow, Docker, `sha256sum`) when a claim depends on them, not just unit tests.
+- Open each pull request against `main`. Don't stack PRs (see `docs/CONTEXT.md`).

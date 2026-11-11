@@ -1,6 +1,8 @@
 # Jessie's Bioinformatics Platform — Design Document
 
-**Status:** Draft v2 · **Date:** 2026-09-27 (v1: 2026-09-14) · **Author:** David (with design assistance from Claude)
+**Status:** Draft v3 · **Date:** 2026-11-11 (v2: 2026-09-27, v1: 2026-09-14) · **Author:** David (with design assistance from Claude)
+
+**Implementation:** P0a (compiler) and P0b (agent, local mode) are built and merged; P0c (control plane) is next. See §10.
 
 ---
 
@@ -69,8 +71,8 @@ Consequences:
 The canvas is never executed directly. It **compiles to real Nextflow DSL2**: generated workflow code importing curated modules, wired per the canvas, with pinned node versions and container digests.
 
 - **Export-as-Nextflow** is a first-class feature: inspectable, runnable-elsewhere code. This is the trust-building escape hatch for institutional bioinformaticians.
-- Compilation validates the full graph (types, required inputs, parameter constraints) before any compute is touched.
-- Generated code targets Nextflow's **strict syntax** (25.04+) so output can be linted by Nextflow itself in CI.
+- Compilation validates the full graph before any compute is touched: every spec and port exists, connected types are compatible, each input is fed at most once, node ids are valid identifiers, and there are no cycles. All errors are reported at once. Unconnected inputs are allowed: they become run inputs. Parameters are rejected until specs can declare them (§3.4).
+- Generated code targets Nextflow's **strict syntax**, pinned to Nextflow 26.10.5, so output is linted by Nextflow itself in CI.
 
 **Segmentation.** A canvas is not compiled into one Nextflow run, nor one run per node. The compiler partitions it into **segments** — connected groups of batch nodes — and each segment becomes one Nextflow run. Boundaries fall only where they are needed anyway: at analysis nodes (which bypass Nextflow) and at cache hits.
 
@@ -110,7 +112,7 @@ A node is a curated artifact comprising:
 
 ```
 nodes/fastqc/0.1.0/
-  spec.json     NodeSpec: ports, execution class, parameters
+  spec.json     NodeSpec: ports, execution class (parameters later)
   main.nf       Nextflow process (batch nodes)
   UPSTREAM.md   provenance of vendored code: repo, commit, path, license, local changes
 ```
@@ -119,6 +121,8 @@ nodes/fastqc/0.1.0/
 - Where nf-core has a well-tested module, it is **vendored**: copied from `github.com/nf-core/modules` at a pinned commit (MIT-licensed; notice kept in `UPSTREAM.md`). Local changes are expected and recorded: containers pinned by digest instead of tag, strict-syntax fixes, unused inputs removed.
 - Convention linking spec and module: input ports in declared order are the process's inputs; output port names are its `emit:` names. Every port's process input and output is a `tuple val(meta), path(...)` (the nf-core convention), per-dataset ones included.
 - Node ids on a canvas must be valid Nextflow identifiers, since codegen uses them in process aliases, and may not contain `__`, which separates node from port in data names.
+
+Specs are JSON, not YAML: `serde_yaml`, the usual Rust YAML crate, is no longer maintained, the database will store specs as JSON, and the same serde types read both. The library loader checks every node on load: the spec parses, its id and version match its directory, and a batch node's module file exists inside the node directory and declares the named process. Today's library: FastQC 0.1.0 and MultiQC 0.1.0, vendored from nf-core/modules at `9791512`.
 
 **Authorship:** v1 ships a platform-curated core library defined as spec files + containers in the platform repo. The spec format is designed from day one for third-party authorship; a node-authoring UI/registry for institutional cores is a later phase. Curation quality *is* the product — ~12 excellent nodes beat 40 mediocre ones.
 
@@ -183,7 +187,7 @@ Agent responsibilities:
 - Upload output artifacts + content hashes to the workspace data plane; register FileRecords via the API
 - **Data gateway (sovereign tier):** broker byte access for UI previews when storage is on-prem
 
-Agents authenticate with compute-environment-scoped tokens against a separate `/api/agent/*` surface (§8.3). The agent is a **Rust static binary** sharing a protocol-types crate with the API. The binary itself has no dependencies, but hosts running batch nodes also need a JVM + Nextflow (Nextflow is Groovy/Java, Java 17+). The agent either uses the site install (e.g. `module load nextflow` on HPC) or bootstraps and caches a pinned JRE + Nextflow version on first run — pinning the version per compute environment also serves reproducibility. Analysis-class nodes never touch the JVM.
+Agents authenticate with compute-environment-scoped tokens against a separate `/api/agent/*` surface (§8.3). The agent is a **Rust static binary** sharing a protocol-types crate with the API. The binary itself has no dependencies (today it is an ordinary glibc build; the static musl build comes with agent packaging in P2), but hosts running batch nodes also need a JVM + Nextflow (Nextflow is Groovy/Java, Java 17+). The agent either uses the site install (e.g. `module load nextflow` on HPC) or bootstraps and caches a pinned JRE + Nextflow version on first run — pinning the version per compute environment also serves reproducibility. Analysis-class nodes never touch the JVM.
 
 **Local mode (P0b).** Before it talks to any server, the agent runs one compiled job from disk: `agent run <project> --input <name>=<manifest> ... --run-dir <dir>`. P0c replaces only where jobs come from (a lease over HTTPS) and where results go (the API); the middle stays the same.
 
@@ -297,7 +301,7 @@ Workspace ─┬─ Members (identity, workspace role)
            ├─ ReferenceRegistry (genomes, annotations, prebuilt indexes)
            └─ Projects
                 ├─ ProjectMembers (user, project role)
-                ├─ Datasets ── Samples ── FileRecords (uri, size, checksum, semantic type)
+                ├─ Datasets ── Samples ── FileRecords (uri, size, digest, semantic type)
                 ├─ SampleSheets
                 ├─ Pipelines ── PipelineVersions (canvas graph JSON; immutable once run)
                 └─ Runs
@@ -307,7 +311,7 @@ Workspace ─┬─ Members (identity, workspace role)
 ```
 
 - **Provenance is foreign keys:** `Artifact → Task → Run → input FileRecords → Samples`. No separate lineage system.
-- **FileRecords store a URI into the workspace data plane, never bytes** — the sovereignty boundary made concrete in the schema.
+- **FileRecords store a URI into the workspace data plane, never bytes** — the sovereignty boundary made concrete in the schema. The digest is self-describing (`sha256:<hex>`, §4.1), computed by the agent, the only component that touches bytes.
 - Audit events: append-only table (who launched/deleted/changed membership, when).
 
 ---
@@ -348,14 +352,15 @@ Compute-environment-scoped tokens; separate `/api/agent/*` surface limited to: l
 |---|---|---|
 | Frontend | Next.js, React Flow, shadcn/ui + Tailwind, TanStack Query | React Flow = canvas mechanics solved |
 | Plots | Vega-Lite specs rendered client-side | Interactive + paper-grade export, mature spec format |
-| Backend language | **Rust**, one Cargo workspace (api, compiler, agent, shared protocol/types crates) | Compiler must live in the control plane; one language means no seam through it. Node science is containerized, so platform language is independent of the bioinformatics ecosystem. |
+| Backend language | **Rust 1.98** (pinned in `rust-toolchain.toml`), one Cargo workspace: `compiler`, `agent`, `protocol` (built); `api` (P0c) | Compiler must live in the control plane; one language means no seam through it. Node science is containerized, so platform language is independent of the bioinformatics ecosystem. |
 | API | axum + sqlx (compile-time-checked SQL, sqlx migrations), utoipa → OpenAPI → generated TS client | Mainstream Rust web stack; typed end to end |
-| Compiler | Rust crate: serde (canvas JSON), petgraph (DAG, segmentation, descendants), minijinja (DSL2 codegen) | Exhaustive `match` over the semantic type system |
+| Compiler | Rust crate: serde (canvas JSON), petgraph (DAG, segmentation, descendants), minijinja (DSL2 codegen), clap (`compiler` CLI) | Exhaustive `match` over the semantic type system |
+| Protocol | Rust crate shared by compiler, agent and API: serde, csv. Job interfaces (`job.json`), manifests, digests, job results (`result.json`), port types | Formats that cross process boundaries are defined once, so both sides agree at compile time |
 | DB | Managed Postgres (Neon or RDS) | Single stateful system: app data + queue + provenance |
 | Queue | Postgres SKIP LOCKED (§6), workers as tokio tasks | No broker to operate |
 | Auth | Clerk (or Cognito); WorkOS for SSO when demanded | Buy, don't build |
-| Agent | Rust static binary (tokio); containers via Docker; JVM + Nextflow on batch hosts (§4.1) | Drop-in install on HPC head nodes; shares protocol types with the API |
-| Testing / CI | cargo test, golden-file compiler tests, testcontainers (real Postgres), `nextflow lint` on generated code, GitHub Actions E2E with a real Nextflow run | |
+| Agent | Rust binary: tokio (process supervision), nix (signals), sha2 (hashing), clap; containers via Docker; JVM + Nextflow on batch hosts (§4.1). Depends on `protocol`, never on `compiler` | Drop-in install on HPC head nodes; shares protocol types with the API |
+| Testing / CI | Built: cargo test (unit + CLI integration tests), expected-output files for codegen, `nextflow lint` on the node library and on a generated project, and `scripts/stub-run.sh` (compile → lint → `agent run --stub`) in GitHub Actions, with Rust and Nextflow versions pinned. P0c adds testcontainers (real Postgres) and an E2E run | |
 | Workflow engine | Nextflow DSL2 (generated) | Ecosystem, executor portability, nf-core modules |
 | MVP compute | One EC2 instance: agent + Nextflow local executor + Docker | Exercises the full architecture with near-zero infra; AWS Batch is a config upgrade later |
 | Object storage | S3, per-workspace prefixes, presigned URLs | |
@@ -368,9 +373,9 @@ Guiding principle: **buy everything that isn't the product.** The product is the
 
 **P0 — walking skeleton, built inside-out.** Goal: a hardcoded 2-node canvas runs end-to-end through the real spine (API → queue → agent lease → Nextflow → artifact upload → hash registration → viewable result). Ordered so the Rust learning curve rises gradually (easiest crate first):
 
-- **P0a — compiler core.** Pure Rust, no async/DB: hardcoded canvas JSON → IR → segments → DSL2 text. Golden-file tests; generated code linted by Nextflow in CI.
-- **P0b — agent, local mode.** A plain Linux process that runs a compiled segment with Nextflow's **local executor** + Docker, parses the trace file, hashes and stores outputs. No server. Kubernetes is deliberately not used here: where tasks run is a Nextflow executor setting (§5.4 level 1), so `k8s`, like Slurm and AWS Batch, is a later config option, not part of the agent's architecture.
-- **P0c — control plane.** axum + sqlx + SKIP LOCKED queue; agent switches from local mode to leasing over HTTPS. One GitHub Actions E2E test: Postgres service container + real tiny Nextflow run.
+- **P0a — compiler core. Done.** Pure Rust, no async/DB: canvas JSON → validated `PipelineGraph` → `ExecutionPlan` (convex segments) → job interfaces → Nextflow projects, plus the `compiler` CLI and the node library. Expected-output tests; generated code linted and stub-run by Nextflow in CI.
+- **P0b — agent, local mode. Done for batch jobs.** `agent check` / `stage` / `run`: preflight, staging, supervised Nextflow run with clean stopping, trace parsing, SHA-256 output hashes, output manifests and `result.json`. Verified with a real Docker run on the nextflow-io/rnaseq-nf test reads. A plain Linux process that runs a compiled segment with Nextflow's **local executor** + Docker, parses the trace file, hashes and stores outputs. No server. Kubernetes is deliberately not used here: where tasks run is a Nextflow executor setting (§5.4 level 1), so `k8s`, like Slurm and AWS Batch, is a later config option, not part of the agent's architecture.
+- **P0c — control plane. Next**, starting with a design walkthrough of the queue, the lease/heartbeat protocol and agent failure. axum + sqlx + SKIP LOCKED queue; agent switches from local mode to leasing over HTTPS. One GitHub Actions E2E test: Postgres service container + real tiny Nextflow run.
 
 **P1 — MVP: RNA-seq vertical slice, managed tier only.**
 
@@ -399,6 +404,7 @@ Guiding principle: **buy everything that isn't the product.** The product is the
 | Bioinformaticians reject a no-code tool | Export-as-Nextflow escape hatch; make them node authors, not gatekeepers |
 | Sovereignty promises vs. metadata leakage | Metadata-only control plane rule enforced in schema; sample-metadata sensitivity mode on P2 roadmap |
 | Interactive latency misses the <30 s bar | Analysis class bypasses Nextflow entirely; warm executor pool; small data artifacts |
+| Large container images slow first runs (FastQC 1.1 GB, MultiQC 1.8 GB; most of a first run's minute was the pull) | Pin by digest so cached images stay valid; pre-pull library images on agents; consider slimmer images per node |
 
 ---
 
@@ -409,4 +415,14 @@ Guiding principle: **buy everything that isn't the product.** The product is the
 - Metadata field-level encryption design for sovereign tier
 - Multi-cloud (GCP) support order
 - Node marketplace / cross-workspace template sharing
+- Parameter design: a schema per node spec, how codegen passes values to modules, and how they enter the cache key. Until then validation rejects parameters.
 - Protocol versioning once agents and the control plane are deployed separately: an older agent will read `job.json` written by a newer compiler. Likely protobuf-style rules (ignore unknown fields, only add fields with defaults, a format version for breaking changes). Today `JobInterface` uses `deny_unknown_fields`, which would make old agents reject every new job.
+
+**Known gaps** (from the 2026-11-11 review of P0a/P0b; none blocks P0c):
+
+- Analysis jobs: planned and segmented, but neither compiled nor executed yet.
+- Directory outputs (e.g. `multiqc_data/`) aren't collected; no current port is a directory.
+- Per-sample `meta` carries only `id`; nf-core modules such as fastp and Salmon also need `single_end`, which the compiler knows from `Fastq { paired }`. Needed before those P1 nodes.
+- The library loader doesn't check that process and port names are valid identifiers, or that a node's input and output port names differ (a shared name would give two pieces of data one name). Needed before third-party nodes (P3).
+- Staging treats every manifest path as a local path, so `s3://` URIs would be mangled. Needed with S3 storage.
+- When a run is stopped, the agent reports it about a second before Docker has removed the task container (§4.1).
