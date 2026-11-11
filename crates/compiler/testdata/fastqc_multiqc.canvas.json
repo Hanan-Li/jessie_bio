@@ -8,8 +8,7 @@
     {
       "id": "multiqc_1",
       "spec": "multiqc",
-      "version": "0.1.0",
-      "params": { "title": "My first QC report" }
+      "version": "0.1.0"
     }
   ],
   "edges": [

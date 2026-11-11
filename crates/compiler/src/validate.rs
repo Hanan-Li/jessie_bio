@@ -23,6 +23,11 @@ pub enum ValidationError {
     )]
     InvalidNodeId(String),
 
+    #[error(
+        "node `{node}` sets {names:?}, but node specs can't declare parameters yet, so they would be ignored"
+    )]
+    UnsupportedParams { node: String, names: Vec<String> },
+
     #[error("node `{node}` uses `{spec}` version {version}, which does not exist")]
     UnknownSpec {
         node: String,
@@ -74,6 +79,15 @@ pub fn validate(
         // and its edges can be checked as usual.
         if !is_valid_node_id(&node.id) {
             errors.push(ValidationError::InvalidNodeId(node.id.clone()));
+        }
+        // Specs have no parameter schema yet, and codegen doesn't pass
+        // parameters on. Accepting them would silently ignore a setting the
+        // scientist chose, so reject them until both exist.
+        if !node.params.is_empty() {
+            errors.push(ValidationError::UnsupportedParams {
+                node: node.id.clone(),
+                names: node.params.keys().cloned().collect(),
+            });
         }
         let Some(spec) = registry.get(&node.spec, &node.version) else {
             errors.push(ValidationError::UnknownSpec {
@@ -209,11 +223,7 @@ mod tests {
 
         assert_eq!(pipeline.graph().node_count(), 2);
         assert_eq!(pipeline.graph().edge_count(), 1);
-        let multiqc = pipeline.index_of("multiqc_1").unwrap();
-        assert_eq!(
-            pipeline.graph()[multiqc].params["title"],
-            "My first QC report"
-        );
+        assert!(pipeline.index_of("multiqc_1").is_some());
         let edge = pipeline.graph().edge_weights().next().unwrap();
         assert_eq!(edge.wiring, Wiring::Gather);
     }
@@ -257,6 +267,27 @@ mod tests {
                 ValidationError::InvalidNodeId("1qc".to_string()),
                 ValidationError::InvalidNodeId("qc__1".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn rejects_parameters_until_specs_can_declare_them() {
+        let canvas = canvas(json!({
+            "nodes": [{
+                "id": "multiqc_1",
+                "spec": "multiqc",
+                "version": "0.1.0",
+                "params": { "title": "My report", "dpi": 300 },
+            }],
+            "edges": [],
+        }));
+        let errors = validate(&canvas, &test_registry()).unwrap_err();
+        assert_eq!(
+            errors,
+            vec![ValidationError::UnsupportedParams {
+                node: "multiqc_1".to_string(),
+                names: vec!["dpi".to_string(), "title".to_string()],
+            }]
         );
     }
 
