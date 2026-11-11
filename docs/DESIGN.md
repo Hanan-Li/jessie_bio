@@ -189,10 +189,10 @@ Agents authenticate with compute-environment-scoped tokens against a separate `/
 
 1. **Preflight**: Java 17+, Nextflow at the pinned version (enforced with `NXF_VER`), Docker reachable without `sudo` (skipped for stub runs).
 2. **Stage**: read `job.json`; check every input has exactly one manifest of the right shape and every file it lists exists; write normalized copies (absolute paths) into the run directory. The project directory is never modified, so one compiled project can be run many times.
-3. **Run**: `nextflow run` as a child process from the run directory, both output streams drained concurrently into log files; Ctrl-C or a timeout sends SIGTERM (Nextflow stops its containers) and SIGKILL after a grace period.
+3. **Run**: `nextflow run` as a child process, in its own process group, from the run directory, both output streams drained concurrently into log files. A stop (Ctrl-C, a time limit, or SIGTERM to the agent itself) sends SIGTERM to Nextflow, which stops its containers; after a grace period, or at a second Ctrl-C/SIGTERM, the whole process group gets SIGKILL. SIGTERM to the agent (systemd, a sysadmin) is handled like any other stop, so Nextflow never outlives the agent and `result.json` is always written; the job's status is then `interrupted`, meaning "retry it", distinct from `cancelled`.
 4. **Parse** `trace.tsv` into typed task records.
 5. **Collect**: walk `results/<name>/<sample>/`, hash every file, write one output manifest per job output.
-6. **Report**: `result.json` (a `protocol` type): status, tasks, outputs with hashes and sizes. In P0c this becomes the body of the agent's "job finished" call.
+6. **Report**: `result.json` (a `protocol` type): status (`succeeded`, `failed`, `timed_out`, `cancelled`, `interrupted`), tasks, outputs with hashes and sizes, and warnings (e.g. an unparseable trace, which no longer prevents the report). In P0c this becomes the body of the agent's "job finished" call.
 
 Run directory: `inputs/` (staged manifests), `work/` (Nextflow work dir), `results/`, `logs/`, `trace.tsv`, `outputs/` (output manifests), `result.json`.
 

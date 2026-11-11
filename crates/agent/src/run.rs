@@ -11,8 +11,11 @@
 //! the stderr pipe, it blocks writing while we block reading, forever.
 //!
 //! Stopping is graceful first: SIGTERM lets Nextflow run its own shutdown,
-//! which stops the task containers it started. Only if it hasn't exited
-//! after `grace` does it get SIGKILL, which can leave containers behind.
+//! which stops the task containers it started. If it hasn't exited after
+//! `grace`, or the caller insists (`force`, e.g. a second Ctrl-C), the
+//! whole process group gets SIGKILL: Nextflow and every process it started.
+//! That can still leave containers behind, which Docker, not the process
+//! group, owns.
 
 use std::future::Future;
 use std::os::unix::process::ExitStatusExt;
@@ -21,7 +24,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::Context;
-use nix::sys::signal::{Signal, kill};
+use nix::sys::signal::{Signal, kill, killpg};
 use nix::unistd::Pid;
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
@@ -33,8 +36,13 @@ use crate::stage::StagedRun;
 /// Why a run was asked to stop before it finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
+    /// Someone asked for this job to stop (Ctrl-C now; the control plane
+    /// in P0c).
     Cancelled,
     TimedOut,
+    /// The agent itself is being shut down (SIGTERM, e.g. from systemd).
+    /// The job didn't fail and wasn't cancelled: it should be retried.
+    Terminated,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,7 +66,8 @@ pub enum Echo {
     Off,
 }
 
-/// Run `command` to completion, or until `stop` fires.
+/// Run `command` to completion, or until `stop` fires. Once stopping, the
+/// child gets `grace` to exit, cut short if `force` fires.
 ///
 /// `stop` is a future (a "thing that will happen later") supplied by the
 /// caller: Ctrl-C or a timeout from the CLI, a plain timer in tests, and
@@ -71,6 +80,7 @@ pub async fn supervise(
     logs_dir: &Path,
     echo: bool,
     stop: impl Future<Output = StopReason>,
+    force: impl Future<Output = ()>,
     grace: Duration,
 ) -> anyhow::Result<Outcome> {
     command
@@ -109,7 +119,7 @@ pub async fn supervise(
             Outcome::Exited { code: status.code(), signal: status.signal() }
         }
         reason = &mut stop => {
-            let forced = stop_gracefully(&mut child, grace).await?;
+            let forced = stop_gracefully(&mut child, grace, force).await?;
             Outcome::Stopped { reason, forced }
         }
     };
@@ -121,28 +131,45 @@ pub async fn supervise(
     Ok(outcome)
 }
 
-/// SIGTERM, then SIGKILL if the child is still running after `grace`.
-/// Returns whether SIGKILL was needed.
-async fn stop_gracefully(child: &mut Child, grace: Duration) -> anyhow::Result<bool> {
+/// SIGTERM to the child, then SIGKILL to its whole process group if it's
+/// still running after `grace` or when `force` fires. Returns whether
+/// SIGKILL was needed.
+async fn stop_gracefully(
+    child: &mut Child,
+    grace: Duration,
+    force: impl Future<Output = ()>,
+) -> anyhow::Result<bool> {
     let Some(pid) = child.id() else {
         return Ok(false); // already exited and reaped
     };
     let pid = Pid::from_raw(i32::try_from(pid)?);
-    // ESRCH ("no such process") means it exited just now: not an error.
-    if let Err(error) = kill(pid, Signal::SIGTERM)
-        && error != nix::errno::Errno::ESRCH
-    {
-        return Err(error).context("sending SIGTERM");
-    }
-    match tokio::time::timeout(grace, child.wait()).await {
-        Ok(status) => {
+    // Only Nextflow gets SIGTERM: it knows how to stop its own tasks.
+    ignore_exited(kill(pid, Signal::SIGTERM)).context("sending SIGTERM")?;
+    tokio::select! {
+        status = child.wait() => {
             status.context("waiting for the child after SIGTERM")?;
-            Ok(false)
+            return Ok(false);
         }
-        Err(_elapsed) => {
-            child.kill().await.context("sending SIGKILL")?;
-            Ok(true)
-        }
+        _ = tokio::time::sleep(grace) => {}
+        _ = force => {}
+    }
+    // The child was started with `process_group(0)`, so its process group
+    // id is its pid. Signalling the group reaches Nextflow *and* every
+    // process it started (task shells, `docker run` clients), which would
+    // otherwise survive it and keep our log pipes open.
+    ignore_exited(killpg(pid, Signal::SIGKILL)).context("sending SIGKILL")?;
+    child
+        .wait()
+        .await
+        .context("waiting for the child after SIGKILL")?;
+    Ok(true)
+}
+
+/// ESRCH ("no such process") means it exited just now: not an error.
+fn ignore_exited(result: nix::Result<()>) -> nix::Result<()> {
+    match result {
+        Err(nix::errno::Errno::ESRCH) => Ok(()),
+        other => other,
     }
 }
 
@@ -214,6 +241,11 @@ mod tests {
         std::future::pending().await
     }
 
+    /// A `force` that never fires: stopping waits out the grace period.
+    async fn no_force() {
+        std::future::pending().await
+    }
+
     async fn after(millis: u64, reason: StopReason) -> StopReason {
         tokio::time::sleep(Duration::from_millis(millis)).await;
         reason
@@ -226,9 +258,16 @@ mod tests {
         let logs = tempfile::tempdir().unwrap();
         let script = "echo out1; echo err1 >&2; echo out2; exit 3";
 
-        let outcome = supervise(shell(script), logs.path(), false, never(), GRACE)
-            .await
-            .unwrap();
+        let outcome = supervise(
+            shell(script),
+            logs.path(),
+            false,
+            never(),
+            no_force(),
+            GRACE,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             outcome,
@@ -249,7 +288,14 @@ mod tests {
         let logs = tempfile::tempdir().unwrap();
         let script = "head -c 1000000 /dev/zero >&2; head -c 1000000 /dev/zero";
 
-        let run = supervise(shell(script), logs.path(), false, never(), GRACE);
+        let run = supervise(
+            shell(script),
+            logs.path(),
+            false,
+            never(),
+            no_force(),
+            GRACE,
+        );
         let outcome = tokio::time::timeout(Duration::from_secs(20), run)
             .await
             .expect("supervise deadlocked")
@@ -271,6 +317,7 @@ mod tests {
             logs.path(),
             false,
             after(100, StopReason::TimedOut),
+            no_force(),
             GRACE,
         )
         .await
@@ -300,6 +347,7 @@ mod tests {
             logs.path(),
             false,
             after(100, StopReason::Cancelled),
+            no_force(),
             Duration::from_millis(300),
         )
         .await
@@ -316,10 +364,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sigkill_reaches_the_whole_process_group() {
+        // The shell ignores SIGTERM and starts a background `sleep`, which
+        // inherits that and also holds our stdout pipe. Killing only the
+        // shell would leave `sleep` running for 30 s, holding the pipe
+        // open, and supervise would wait for it.
+        let logs = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+
+        let run = supervise(
+            shell("trap '' TERM; sleep 30 & wait"),
+            logs.path(),
+            false,
+            after(100, StopReason::Cancelled),
+            no_force(),
+            Duration::from_millis(300),
+        );
+        let outcome = tokio::time::timeout(Duration::from_secs(20), run)
+            .await
+            .expect("a process the group kill missed kept supervise waiting")
+            .unwrap();
+
+        assert!(matches!(outcome, Outcome::Stopped { forced: true, .. }));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn force_skips_the_rest_of_the_grace_period() {
+        let logs = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+
+        let outcome = supervise(
+            shell("trap '' TERM; exec sleep 30"),
+            logs.path(),
+            false,
+            after(100, StopReason::Terminated),
+            async { tokio::time::sleep(Duration::from_millis(200)).await },
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            Outcome::Stopped {
+                reason: StopReason::Terminated,
+                forced: true
+            }
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "waited out the grace period"
+        );
+    }
+
+    #[tokio::test]
     async fn a_command_that_cannot_start_is_an_error() {
         let logs = tempfile::tempdir().unwrap();
         let command = Command::new("definitely-not-a-real-program");
-        let err = supervise(command, logs.path(), false, never(), GRACE)
+        let err = supervise(command, logs.path(), false, never(), no_force(), GRACE)
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("starting the child process"));
