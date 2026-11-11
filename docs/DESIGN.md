@@ -196,6 +196,10 @@ Agents authenticate with compute-environment-scoped tokens against a separate `/
 
 Run directory: `inputs/` (staged manifests), `work/` (Nextflow work dir), `results/`, `logs/`, `trace.tsv`, `result.json`.
 
+Generated configs run task containers as the calling user (`docker.runOptions = '-u $(id -u):$(id -g)'`); with Docker's default of root, every file in `work/` belongs to root and the agent's user can't clean up.
+
+Known issue: when a run is stopped, Nextflow exits about a second before Docker has removed the task container it was stopping, so the agent reports "stopped" slightly early. Fix by labelling each run's containers (e.g. `--label` in the run's Docker options) and waiting until none with that label remain; untagged `docker ps` filtering would also catch other jobs' containers on a shared host.
+
 Failures are typed, because each kind gets a different response: the environment is wrong (fix the host), the inputs are wrong (fix the run request), a task failed (tell the scientist), the run was cancelled or timed out, or the agent itself broke (alert us).
 
 Hashes are **self-describing**: `sha256:<hex>`, like container digests. The algorithm is an enum with one variant today; adding another (e.g. BLAKE3 for very large files) leaves old records readable.
