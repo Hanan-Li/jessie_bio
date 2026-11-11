@@ -92,6 +92,10 @@ impl StagedRun {
         self.run_dir.join("results")
     }
 
+    pub fn logs_dir(&self) -> PathBuf {
+        self.run_dir.join("logs")
+    }
+
     /// Arguments for `nextflow`, run from the run directory. A stub run
     /// executes each module's `stub:` block and turns Docker off, so it
     /// needs no containers or real data.
