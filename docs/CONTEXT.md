@@ -28,6 +28,7 @@ Background from the design and build conversations (2026-09-14 to 2026-11-11) th
 - **Containers run as the calling user** (2026-11-10): found on the first real run, when root-owned files in `work/` couldn't be deleted.
 - **Stopping** (2026-11-11, from the review): SIGTERM to the agent is a stop like Ctrl-C, and the job becomes `interrupted` ("retry it"), not `cancelled`. Before the fix, stopping the agent orphaned Nextflow and lost the result.
 - **Parameters rejected until designed** (2026-11-11, from the review): the test canvas set a MultiQC title that was silently ignored. Rejecting is better than ignoring a scientist's setting.
+- **P0c agent protocol** (2026-11-13, design walkthrough): leases with fencing rather than ownership; one lease response carrying the whole job description, metadata only. David chose project files **by digest** over inline (inline would have been fine at 7 KB) to build the scaling path from the start, modelled on Bazel's CAS. Outputs stay on the agent's machine for now; uploads come later. Versioning: the protobuf-style rules proposed in the walkthrough.
 
 ## Progress log
 

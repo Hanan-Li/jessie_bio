@@ -213,6 +213,62 @@ Failures are typed, because each kind gets a different response: the environment
 
 Hashes are **self-describing**: `sha256:<hex>`, like container digests. The algorithm is an enum with one variant today; adding another (e.g. BLAKE3 for very large files) leaves old records readable.
 
+**Agent protocol (P0c).** Designed 2026-11-13; not built yet.
+
+*Leases.* An agent doesn't own a job; it holds a **lease**: a time-limited claim ("mine until T") that it renews with heartbeats. A lease isn't the job's run time but how long the agent may go silent, so a 6-hour alignment simply keeps renewing. If heartbeats stop (crash, `kill -9`, lost power, network partition), the lease expires and the reaper returns the job to the queue (§6). This is the only way to tell a dead agent from a slow one. Same idea as Pub/Sub ack deadlines or SQS visibility timeouts.
+
+- **Fencing.** Every lease carries an `attempt` number, incremented on each acquire. Heartbeats and results must echo it, and the control plane accepts only the current one: an agent cut off by a partition, whose lease was reassigned, gets `409 Conflict`, stops its run, and discards its work.
+- **At-least-once.** A job can therefore run twice (the cut-off agent and its replacement). That must be harmless: outputs are content-addressed, and each attempt works in its own directory.
+- **One clock.** Expiry times come from Postgres's `now()`, never from an agent's clock.
+- **Starting values:** lease 60 s, heartbeat every 20 s (two heartbeats can fail and the lease still holds), 3 attempts before a job is marked failed instead of retried, so a job that crashes agents can't take them all down in turn.
+- **Commands ride on heartbeats.** Agents only call out (no inbound connections), so "cancel" is the reply to the next heartbeat. In `supervise`, "cancel" and "lease lost" become two more branches of the stop future, alongside Ctrl-C, SIGTERM and the time limit.
+
+*Messages.* Three calls on the `/api/agent/*` surface:
+
+```
+POST /api/agent/lease                  → a lease response, or 204 No Content (poll again)
+POST /api/agent/jobs/{id}/heartbeat    { attempt, progress }  → { action: continue | cancel }, or 409 (lease lost)
+POST /api/agent/jobs/{id}/result       { attempt, result: JobResult }  → 200, or 409 (stale attempt)
+```
+
+Short polling with backoff first; long polling (the server holds the request until a job is queued, via `LISTEN/NOTIFY`) later.
+
+*The lease response* is the agent's whole job description. It carries metadata only, never data bytes:
+
+| Field | Contents |
+|---|---|
+| `format_version` | The message format version (see versioning below) |
+| `lease` | `job_id`, `attempt` (the fencing token), `expires_at`, `heartbeat_every_secs` (server-tunable without upgrading agents) |
+| `run` | `run_id` and the job's index in its plan, for logs and the agent's directories |
+| `settings` | Nextflow version, hash algorithm, time limit: decided per compute environment by the control plane, no longer agent constants or CLI flags |
+| `project` | The project's tree digest and its listing, path → `{digest, size}` (below) |
+| `interface` | The `JobInterface` (`job.json`) |
+| `inputs` | Each job input, **already resolved** by the scheduler (`from: run` → the dataset's files; `from: job` → the files recorded in that earlier job's result), as `{sample, uri, digest}` records. Digests let the agent verify inputs against what was registered; when to pay for that hashing is a policy for later. The agent writes the CSV manifests for Nextflow itself. |
+
+The agent writes all of this to disk in the layout local mode reads today (`jobs/<job_id>/<attempt>/`), then runs the unchanged stage → run → collect code. Local mode becomes the special case where the lease came from a directory.
+
+*Project files by digest, like Bazel's content-addressable store.* Each project file is a **blob** stored under its own digest, so a module shared by many projects (FastQC 0.1.0) is stored and downloaded once. A project is a **tree** listing path → `{digest, size}`; the tree is itself a blob, and its digest is the project's digest (a Merkle tree, like git trees, OCI manifests and Bazel's `Directory` messages). The lease carries the tree; the agent fetches only the blobs it lacks (`GET /api/agent/blobs/{digest}`).
+
+- Blobs never change, so they can be cached forever (HTTP `Cache-Control: immutable`, the digest as ETag), including by proxies.
+- The agent hashes every blob it receives and rejects a mismatch; the size catches truncation early and lets it refuse oversized blobs.
+- Agent cache: `~/.cache/jessie-agent/blobs/sha256/<2 hex>/<rest>`. Write to a temporary file, then rename into place, so a partial download is never visible; only verified bytes enter the cache.
+- Storage: a Postgres `blobs` table in P0c (a project is a few KB of text); S3 later behind the same endpoint, which can redirect.
+- The same "fetch by digest from a source, verify, cache" component will later serve input data (local disk now; S3 via presigned URLs, campus file servers) and reference genomes, where the real savings are: a reference index used by a thousand jobs on one agent is downloaded once. Data still never passes through the control plane.
+- Batch lookups ("which of these do I lack?") can come later, like Bazel's `FindMissingBlobs` / `BatchReadBlobs`; one GET per blob is enough to start.
+- `protocol` gains the blob and tree types and a shared "hash these bytes" function (so it depends on `sha2`); the API builds trees from the compiler's `NextflowProject`, the agent verifies them.
+
+*Outputs stay on the agent's machine in P0c.* `result.json` records where each file is, including which agent or machine holds it; uploading to the workspace's storage (customer storage or S3) comes later. Until then, a job that reads another job's outputs must run where those outputs are: the scheduler places it on the same agent, or the same machine when agents share a filesystem. With one agent this happens by itself, but it is an explicit rule, so a second agent can never lease a job whose inputs it can't reach. The same "move work to data" idea as §5.4.
+
+*Versioning.* Agents and the control plane are upgraded at different times, so an old agent will read messages from a newer control plane, and the reverse. For messages between separately deployed programs (`job.json`, the lease, heartbeat and result messages, `result.json`):
+
+1. Readers **ignore unknown fields**.
+2. Fields are only ever **added, each with a default** (`#[serde(default)]`).
+3. Fields are **never renamed or removed**, and their meaning never changes; to change one, add a new field and retire the old.
+4. **`format_version`** is an integer, bumped only for breaking changes; a reader that gets a newer version than it understands refuses the message with a clear "upgrade the agent" error instead of misreading it.
+5. **New enum variants** break old readers even when unknown fields are ignored. Per enum: an `Unknown` fallback (`#[serde(other)]`) where a value is informational, such as task statuses; a `format_version` bump where the reader must act on it.
+
+The canvas and node specs stay strict (`deny_unknown_fields`): the canvas is untrusted input, specs are curated in this repo, and a typo in either should fail loudly. These rules are implemented with the P0c `protocol` types, when `job.json` and `result.json` also gain `format_version`.
+
 ### 4.2 Deployment tiers (sovereignty model)
 
 Same UI, same nodes, same everything — a workspace differs only in *where its data plane lives*:
@@ -272,7 +328,25 @@ Three distinct levels, adopted in this order:
 
 ## 6. Job Queue & Dispatch
 
-**Postgres-backed queue** in the control-plane database — no Redis, no Celery, no separate broker. A `jobs` table claimed with `SELECT … FOR UPDATE SKIP LOCKED`, plus lease/heartbeat/expiry columns, retry-with-backoff via `run_at`, a reaper for expired leases, and optional `LISTEN/NOTIFY` for low-latency pickup.
+**Postgres-backed queue** in the control-plane database — no Redis, no Celery, no separate broker. A `jobs` table claimed with `SELECT … FOR UPDATE SKIP LOCKED`, plus lease/heartbeat/expiry columns, retry-with-backoff via `run_at`, a reaper for expired leases, and optional `LISTEN/NOTIFY` for low-latency pickup. Lease semantics (fencing by `attempt`, the database clock, at-least-once delivery) are in §4.1, *Agent protocol*. The three core statements:
+
+```sql
+-- acquire: claim one queued job atomically; concurrent agents skip locked rows
+UPDATE jobs SET state = 'leased', agent_id = $1, attempt = attempt + 1,
+                lease_expires_at = now() + interval '60 seconds'
+WHERE id = (SELECT id FROM jobs WHERE state = 'queued' AND compute_env = $2
+            ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
+RETURNING id, attempt;
+
+-- heartbeat: renew only if this agent still holds this attempt (0 rows: lease lost)
+UPDATE jobs SET lease_expires_at = now() + interval '60 seconds'
+WHERE id = $1 AND attempt = $2 AND state = 'leased';
+
+-- reaper: expired leases go back to the queue (or fail after the last attempt)
+UPDATE jobs SET state = 'queued' WHERE state = 'leased' AND lease_expires_at < now();
+```
+
+The acquire query will also filter by placement: while outputs live on agents' disks (§4.1), a job whose inputs are on one agent may only be leased by that agent. Job states and transitions are still to be designed.
 
 Why:
 
@@ -355,7 +429,7 @@ Compute-environment-scoped tokens; separate `/api/agent/*` surface limited to: l
 | Backend language | **Rust 1.98** (pinned in `rust-toolchain.toml`), one Cargo workspace: `compiler`, `agent`, `protocol` (built); `api` (P0c) | Compiler must live in the control plane; one language means no seam through it. Node science is containerized, so platform language is independent of the bioinformatics ecosystem. |
 | API | axum + sqlx (compile-time-checked SQL, sqlx migrations), utoipa → OpenAPI → generated TS client | Mainstream Rust web stack; typed end to end |
 | Compiler | Rust crate: serde (canvas JSON), petgraph (DAG, segmentation, descendants), minijinja (DSL2 codegen), clap (`compiler` CLI) | Exhaustive `match` over the semantic type system |
-| Protocol | Rust crate shared by compiler, agent and API: serde, csv. Job interfaces (`job.json`), manifests, digests, job results (`result.json`), port types | Formats that cross process boundaries are defined once, so both sides agree at compile time |
+| Protocol | Rust crate shared by compiler, agent and API: serde, csv. Job interfaces (`job.json`), manifests, digests, job results (`result.json`), port types; in P0c also the lease, heartbeat and result messages and blob/tree types (adding sha2) | Formats that cross process boundaries are defined once, so both sides agree at compile time; versioned per §4.1 |
 | DB | Managed Postgres (Neon or RDS) | Single stateful system: app data + queue + provenance |
 | Queue | Postgres SKIP LOCKED (§6), workers as tokio tasks | No broker to operate |
 | Auth | Clerk (or Cognito); WorkOS for SSO when demanded | Buy, don't build |
@@ -375,7 +449,7 @@ Guiding principle: **buy everything that isn't the product.** The product is the
 
 - **P0a — compiler core. Done.** Pure Rust, no async/DB: canvas JSON → validated `PipelineGraph` → `ExecutionPlan` (convex segments) → job interfaces → Nextflow projects, plus the `compiler` CLI and the node library. Expected-output tests; generated code linted and stub-run by Nextflow in CI.
 - **P0b — agent, local mode. Done for batch jobs.** `agent check` / `stage` / `run`: preflight, staging, supervised Nextflow run with clean stopping, trace parsing, SHA-256 output hashes, output manifests and `result.json`. Verified with a real Docker run on the nextflow-io/rnaseq-nf test reads. A plain Linux process that runs a compiled segment with Nextflow's **local executor** + Docker, parses the trace file, hashes and stores outputs. No server. Kubernetes is deliberately not used here: where tasks run is a Nextflow executor setting (§5.4 level 1), so `k8s`, like Slurm and AWS Batch, is a later config option, not part of the agent's architecture.
-- **P0c — control plane. Next**, starting with a design walkthrough of the queue, the lease/heartbeat protocol and agent failure. axum + sqlx + SKIP LOCKED queue; agent switches from local mode to leasing over HTTPS. One GitHub Actions E2E test: Postgres service container + real tiny Nextflow run.
+- **P0c — control plane. Next.** Design in progress: the agent protocol (leases, messages, project files by digest, local outputs, versioning) is decided in §4.1; the queue's job states and the scheduler are next. axum + sqlx + SKIP LOCKED queue; agent switches from local mode to leasing over HTTPS. One GitHub Actions E2E test: Postgres service container + real tiny Nextflow run.
 
 **P1 — MVP: RNA-seq vertical slice, managed tier only.**
 
@@ -416,7 +490,9 @@ Guiding principle: **buy everything that isn't the product.** The product is the
 - Multi-cloud (GCP) support order
 - Node marketplace / cross-workspace template sharing
 - Parameter design: a schema per node spec, how codegen passes values to modules, and how they enter the cache key. Until then validation rejects parameters.
-- Protocol versioning once agents and the control plane are deployed separately: an older agent will read `job.json` written by a newer compiler. Likely protobuf-style rules (ignore unknown fields, only add fields with defaults, a format version for breaking changes). Today `JobInterface` uses `deny_unknown_fields`, which would make old agents reject every new job.
+- Job states and transitions in the queue, and the scheduler that resolves inputs and enqueues jobs once their dependencies succeed (P0c, next in the design walkthrough).
+- Upload of outputs to workspace storage (customer storage or S3), which lifts the rule that dependent jobs run where their inputs are.
+- (Decided 2026-11-13: protocol versioning, now in §4.1.)
 
 **Known gaps** (from the 2026-11-11 review of P0a/P0b; none blocks P0c):
 
