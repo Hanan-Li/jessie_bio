@@ -16,6 +16,24 @@ env:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    # The api crate's tests run against a real Postgres: #[sqlx::test]
+    # creates a fresh database per test on this server.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: jessie
+          POSTGRES_PASSWORD: jessie
+          POSTGRES_DB: jessie
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U jessie"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://jessie:jessie@localhost:5432/jessie
     steps:
       - uses: actions/checkout@v4
 
