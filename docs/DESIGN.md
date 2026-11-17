@@ -346,14 +346,14 @@ WHERE id = $1 AND attempt = $2 AND state = 'leased';
 UPDATE jobs SET state = 'queued' WHERE state = 'leased' AND lease_expires_at < now();
 ```
 
-The acquire query will also filter by placement: while outputs live on agents' disks (§4.1), a job whose inputs are on one agent may only be leased by that agent. Job states and transitions are still to be designed.
+The acquire query also filters on `run_at <= now()` (retry backoff) and on placement (below).
 
 Why:
 
 - **One fewer stateful system** for a solo operator; rides Postgres backups/HA.
 - **Transactional enqueue:** creating a Run and its dispatch job commit atomically; marking a Task done and enqueuing downstream nodes is atomic. Eliminates the dual-write bug class entirely — significant correctness-for-free in a DAG scheduler.
 - **Queryable:** the queue is SQL, joinable against runs/tasks for dashboards and debugging.
-- **Scale headroom:** pattern is comfortable at hundreds of jobs/sec; facility load is orders of magnitude below.
+- **Scale headroom:** see *Why Postgres, and when to revisit* below.
 
 Two consumer types:
 
@@ -362,7 +362,71 @@ Two consumer types:
 
 Rules: never hold a queue transaction open during work (claim → commit → work → update); a long Nextflow execution is **not** a held job — the job is *dispatch & monitor*; the agent owns the hours-long run and reports state transitions.
 
-Implementation: hand-rolled with sqlx (~200 lines), so the queue and the agent API share one model and one set of types. Lease semantics are load-bearing enough that owning this code beats adopting a job-queue crate.
+Implementation: hand-rolled with sqlx (~200 lines), so the queue and the agent API share one model and one set of types. Lease semantics are load-bearing enough that owning this code beats adopting a job-queue crate. All queue SQL lives in one module of the API crate (`acquire`, `heartbeat`, `complete`, `reap`, `cancel`); nothing else writes the `jobs` table.
+
+**Job states** (decided 2026-11-16; not built yet). A job is one entry of an `ExecutionPlan`: a segment or an analysis node.
+
+| State | Meaning | Leaves by |
+|---|---|---|
+| `blocked` | Waiting for the jobs it depends on | → `queued` when they have all succeeded; → `skipped` if one failed |
+| `queued` | Ready: inputs resolved, waiting for an agent | → `leased` when an agent acquires it; → `cancelled` |
+| `leased` | An agent holds the lease and is running it | → a final state when its result arrives; → `queued` when the lease expires or the result is `interrupted` (attempts left); → `failed` (no attempts left) |
+| `succeeded`, `failed`, `cancelled`, `skipped` | Final | — |
+
+Every transition is a conditional update (`UPDATE … WHERE id = $1 AND state = 'leased' AND attempt = $2`): zero rows means another actor (an agent, the reaper, a cancel) moved the job first. Compare-and-set, the same idea as fencing, on every change.
+
+**Who moves jobs.** There is no separate scheduler process: each transition happens inside the transaction that causes it.
+
+1. **Launch** (one transaction): insert the run and all its jobs; jobs without dependencies start `queued` with inputs resolved from the dataset, the rest `blocked`.
+2. **Acquire and heartbeat**: the agent protocol (§4.1).
+3. **A result** (one transaction): record the job's final state and its outputs; for each dependent job whose dependencies have now all succeeded, resolve its inputs from the stored outputs and move it to `queued`. Either all of it happens or none, so "job done but nothing downstream started" can't occur.
+4. **The reaper**: a tokio task in the API process, every ~10 s, handling expired leases. Safe with several API replicas, because it claims rows with `SKIP LOCKED` too.
+5. **Cancel** (the scientist): `blocked` and `queued` jobs → `cancelled` at once; `leased` jobs get `cancel_requested`, the next heartbeat reply says "cancel", and the agent's result moves the job to `cancelled`. If that agent is dead, the reaper sees the flag on the expired lease and cancels rather than requeues.
+
+Inputs are resolved when a job becomes `queued`, not when it is leased: the lease response is then a plain read, identical across retries.
+
+**Retry policy.** Retry what the infrastructure broke; never retry what will fail the same way again.
+
+| Outcome | Retry? |
+|---|---|
+| Lease expired (agent crashed, network partition) | Yes, after a backoff |
+| `interrupted` (agent shut down) | Yes, immediately |
+| `failed` with a failed task (the tool rejected its input) | No: show the scientist the tool's error |
+| `failed` with no failed task (Nextflow or the pipeline errored) | No, for now: retrying could hide pipeline bugs |
+| `timed_out` | No: the limit was a decision |
+
+At most 3 attempts (`max_attempts`); `interrupted` counts as an attempt, so an agent that is restarted over and over can't hold a job forever. Backoff via `run_at` (+30 s, then +2 min). After the last attempt the job is `failed` ("the agent was lost 3 times"), so a job that crashes agents can't take them all down in turn. An agent runs preflight before it leases anything, so a broken host never takes leases it can only fail.
+
+**Run state** is stored on the run and updated in the same transaction as the job change behind it, not computed from jobs on every read (run lists are the most-viewed screen): `running` while any job is unfinished; `succeeded` when all jobs succeeded; `failed` as soon as one job fails, with every job downstream of it, directly or not, `skipped` while unrelated branches keep running; `cancelled` when the scientist cancels.
+
+**Placement.** While outputs stay on agents' disks (§4.1), resolving a job's inputs also fixes where it can run: if any input lives on agent A, the job gets `pinned_agent = A`, and acquire adds `AND (pinned_agent IS NULL OR pinned_agent = $agent_id)`. If A is gone for good, its outputs went with it: a pinned job left `queued` too long fails ("the agent holding this job's inputs is gone"), and only rerunning the upstream job helps. Uploading outputs to shared storage removes this limit.
+
+**Analysis jobs** are rejected when a run is launched ("analysis jobs aren't supported yet"), as parameters are rejected at validation, rather than queued forever with no agent able to run them.
+
+**Tables** (a sketch):
+
+```
+runs             (id, project_id, pipeline_version_id, state, created_at, finished_at)
+jobs             (id, run_id, job_index, kind,
+                  state, attempt, max_attempts, run_at,           -- queue
+                  agent_id, lease_expires_at, cancel_requested,   -- lease
+                  compute_env, pinned_agent,                      -- placement
+                  project_tree, interface, resolved_inputs,       -- what the lease response sends
+                  result, failure_reason)                         -- outcome
+job_dependencies (job_id, depends_on_job_id)
+job_outputs      (job_id, name, sample, uri, digest, size, agent_id)   -- becomes FileRecords (§7)
+```
+
+**Why Postgres, and when to revisit.** The queue stays small because a job is a whole segment, minutes to hours long; per-sample tasks are scheduled by Nextflow inside it. Even at 10,000 runs a day × 5 jobs, that is about 0.6 jobs per second; the heaviest load is heartbeats, about 500 single-row updates per second with 10,000 jobs running at once. A well-provisioned Postgres commonly sustains thousands to tens of thousands of such updates per second. Airflow runs several schedulers on this same `SKIP LOCKED` pattern, and Temporal can run on Postgres: workflow state is a database problem first.
+
+A distributed queue (SQS, Pub/Sub, Kafka) would cost more than it gains: enqueueing would no longer be transactional with the state change (needing an outbox table, i.e. a queue in Postgres anyway); leases and fencing would still live in Postgres (SQS's visibility timeout has no fencing token; Pub/Sub's ack deadline caps at 10 minutes, against jobs of hours); Kafka is a log, not a work queue; and it is one more system to run.
+
+Scaling steps, in order:
+
+1. **Tuning**: a partial index on `state = 'queued'`; cheaper heartbeats (every Postgres `UPDATE` writes a new row version for vacuum to clean up, so: one heartbeat per agent covering all its jobs, longer intervals for long-running jobs, lease columns in a narrow table of their own); long polling; moving finished jobs out (time partitions or an archive table).
+2. **Bigger hardware and read replicas** for dashboards and run lists.
+3. **Sharding** by workspace or compute environment, a boundary the design already has (a sovereign institution may run its own control plane).
+4. **A dedicated queue system**, only on these signals: thousands of state changes per second sustained, a control plane active in several regions at once, or lock waits on the queue table in profiles. Keeping all queue SQL in one module keeps that replacement contained.
 
 ---
 
@@ -449,7 +513,7 @@ Guiding principle: **buy everything that isn't the product.** The product is the
 
 - **P0a — compiler core. Done.** Pure Rust, no async/DB: canvas JSON → validated `PipelineGraph` → `ExecutionPlan` (convex segments) → job interfaces → Nextflow projects, plus the `compiler` CLI and the node library. Expected-output tests; generated code linted and stub-run by Nextflow in CI.
 - **P0b — agent, local mode. Done for batch jobs.** `agent check` / `stage` / `run`: preflight, staging, supervised Nextflow run with clean stopping, trace parsing, SHA-256 output hashes, output manifests and `result.json`. Verified with a real Docker run on the nextflow-io/rnaseq-nf test reads. A plain Linux process that runs a compiled segment with Nextflow's **local executor** + Docker, parses the trace file, hashes and stores outputs. No server. Kubernetes is deliberately not used here: where tasks run is a Nextflow executor setting (§5.4 level 1), so `k8s`, like Slurm and AWS Batch, is a later config option, not part of the agent's architecture.
-- **P0c — control plane. Next.** Design in progress: the agent protocol (leases, messages, project files by digest, local outputs, versioning) is decided in §4.1; the queue's job states and the scheduler are next. axum + sqlx + SKIP LOCKED queue; agent switches from local mode to leasing over HTTPS. One GitHub Actions E2E test: Postgres service container + real tiny Nextflow run.
+- **P0c — control plane. Next.** Design in progress: the agent protocol (leases, messages, project files by digest, local outputs, versioning) is decided in §4.1, and the queue (job and run states, transitions, retries, placement, why Postgres) in §6; the API side is next. axum + sqlx + SKIP LOCKED queue; agent switches from local mode to leasing over HTTPS. One GitHub Actions E2E test: Postgres service container + real tiny Nextflow run.
 
 **P1 — MVP: RNA-seq vertical slice, managed tier only.**
 
@@ -490,7 +554,7 @@ Guiding principle: **buy everything that isn't the product.** The product is the
 - Multi-cloud (GCP) support order
 - Node marketplace / cross-workspace template sharing
 - Parameter design: a schema per node spec, how codegen passes values to modules, and how they enter the cache key. Until then validation rejects parameters.
-- Job states and transitions in the queue, and the scheduler that resolves inputs and enqueues jobs once their dependencies succeed (P0c, next in the design walkthrough).
+- The API side of P0c: creating a run from a canvas (calling the compiler, storing projects as blobs and trees, resolving the first jobs' inputs), and how the frontend will call it. Next in the design walkthrough.
 - Upload of outputs to workspace storage (customer storage or S3), which lifts the rule that dependent jobs run where their inputs are.
 - (Decided 2026-11-13: protocol versioning, now in §4.1.)
 
