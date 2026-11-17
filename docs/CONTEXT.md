@@ -56,6 +56,8 @@ These are for awareness, not blockers; the project is learning-first.
 
 - Development happens in a **Linux VM** (Ubuntu), with the repo on the VM's own filesystem (not a Windows shared folder).
 - Installed: Rust via rustup (the repo pins 1.98), Java 17, Nextflow 26.10.5 (in `~/.local/bin`), Docker 29. David's user is in the `docker` group, which real runs need.
+- Development Postgres: the `jessie-postgres` container (`postgres:17`, 671 MB image) from `scripts/dev-db.sh`, on **127.0.0.1:5433** with the `jessie-pgdata` volume. Port 5432 is taken by a system-wide Postgres service on the VM, left untouched.
+- Port 8080 is taken by David's `freqtrade` container (FreqUI), which answers 200 to every path; the API defaults to **127.0.0.1:8470**. Lesson from setting this up: a health check must recognise the service's own response, not just accept any 200.
 - Test data: the nextflow-io/rnaseq-nf demo reads `ggal_gut_1.fq` / `ggal_gut_2.fq` (pinned commit `53377cf`), downloaded to `data/ggal/`, which is git-ignored. `out/` (compiled projects and run directories) is git-ignored too.
 - GitHub: `Hanan-Li/jessie_bio`, SSH remote. The `gh` CLI isn't installed, so pull requests are opened through prefilled compare links.
 - **Pull requests target `main` directly.** Stacked PRs (a PR whose base is another PR's branch) merged into their base branches instead of `main` (#6, #7, fixed by #8), because "Automatically delete head branches" was off. Don't stack PRs unless that setting is on.

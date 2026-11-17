@@ -5,36 +5,50 @@ canvas, which compiles to Nextflow DSL2. Design: [`docs/DESIGN.md`](docs/DESIGN.
 Background and decisions: [`docs/CONTEXT.md`](docs/CONTEXT.md).
 
 Current stage: P0a (the compiler) and P0b (the agent in local mode) are done;
-next is P0c, the control plane.
+P0c, the control plane, is being built (DESIGN.md §4.3 lists the order).
 
 ## Layout
 
 ```
 crates/compiler/   canvas → validated graph → jobs → Nextflow projects (+ the `compiler` CLI)
 crates/agent/      runs a compiled job with Nextflow and records the result (the `agent` CLI)
+crates/api/        the control plane: HTTP API on Postgres (the `api` server); migrations/
 crates/protocol/   formats shared by compiler, agent and API: job interfaces, manifests,
                    digests, job results, port types
 nodes/             the node library: one directory per node version (spec, module, provenance)
 scripts/           stub-run.sh: compile the test canvas, lint it, stub-run it with the agent
+                   dev-db.sh: start the development Postgres in Docker
 ```
 
 ## Requirements
 
 - Rust (version pinned in `rust-toolchain.toml`; rustup installs it automatically)
 - Java 17+ and Nextflow 26.10.5, for anything that runs Nextflow
-- Docker, for real runs. Your user must be able to use it without `sudo`:
+- Docker, for real runs and the development database. Your user must be able
+  to use it without `sudo`:
 
   ```bash
   sudo usermod -aG docker "$USER"   # then log out and back in
   docker run --rm hello-world       # check
   ```
 
+## Development database
+
+The `api` crate's tests and server need Postgres. `scripts/dev-db.sh` runs it
+in Docker on `127.0.0.1:5433` (not 5432, which a system Postgres often holds),
+with its data in the `jessie-pgdata` volume:
+
+```bash
+scripts/dev-db.sh
+export DATABASE_URL=postgres://jessie:jessie@localhost:5433/jessie
+```
+
 ## Checks
 
 ```bash
 cargo fmt --all --check
 cargo clippy --all-targets --locked -- -D warnings
-cargo test --locked
+cargo test --locked       # needs DATABASE_URL (see above) for the api tests
 nextflow lint nodes/
 scripts/stub-run.sh      # compile + lint + stub run, no containers or real data
 ```
@@ -97,3 +111,14 @@ To run a compiled project by hand instead, without the agent:
 cd out/job-0
 nextflow run main.nf --fastqc_1__reads /abs/path/reads.csv -output-dir results
 ```
+
+## Run the API server
+
+```bash
+cargo run -p api          # needs DATABASE_URL; listens on http://127.0.0.1:8470
+curl localhost:8470/healthz
+```
+
+On start it applies the database migrations and publishes the node library,
+refusing to start if `nodes/` changed a version that was already published.
+So far it serves only `/healthz`; the endpoints in DESIGN.md §4.3 follow.

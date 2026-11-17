@@ -15,8 +15,10 @@ publish = false
 # `serde = { workspace = true }`.
 [workspace.dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+axum = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
 csv = "1"
+http-body-util = "0.1"
 # `serde` lets templates receive any Serialize value.
 minijinja = { version = "3", features = ["serde"] }
 # Unix system calls; the agent uses it to send SIGTERM.
@@ -25,8 +27,12 @@ petgraph = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
+# Runtime-checked queries for now; compile-time checking (query!) needs a
+# database or saved metadata at build time, added later (DESIGN.md §4.3).
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate", "json"] }
 tempfile = "3"
 thiserror = "2"
+tower = { version = "0.5", features = ["util"] }
 # Only the parts the agent uses: the multi-threaded runtime, #[tokio::main],
 # child processes, files, timers and Ctrl-C.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "time", "signal", "io-util"] }

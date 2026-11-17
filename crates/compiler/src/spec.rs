@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::library::LibraryNode;
 use crate::types::{Cardinality, SemanticType};
@@ -16,7 +16,7 @@ use crate::types::{Cardinality, SemanticType};
 /// In JSON: `{"class": "batch", "module": {...}}` or
 /// `{"class": "analysis", "container": "..."}`. A batch node without a module
 /// cannot be represented.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "class", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Execution {
     /// Compiled into a Nextflow segment.
@@ -26,7 +26,7 @@ pub enum Execution {
 }
 
 /// The Nextflow process behind a batch node.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NextflowModule {
     /// The process name declared in the module, e.g. `FASTQC`.
@@ -35,7 +35,7 @@ pub struct NextflowModule {
     pub file: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortSpec {
     pub name: String,
@@ -45,7 +45,7 @@ pub struct PortSpec {
     pub cardinality: Cardinality,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeSpec {
     pub id: String,

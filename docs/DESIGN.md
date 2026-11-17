@@ -335,7 +335,7 @@ The UI will also need read endpoints the walking skeleton doesn't: the node pale
 
 Compilation happens synchronously inside the request: the compiler takes milliseconds and does no I/O, and it keeps development simple. It can move to a background step if pipelines ever grow large enough to matter.
 
-**The node library at startup.** The API loads `nodes/` (`load_library`) and writes each spec and module into Postgres. Immutability is enforced here, not just by convention: if `fastqc/0.1.0` already exists with different content, startup fails with "version 0.1.0 changed; publish a new version".
+**The node library at startup.** The API loads `nodes/` (`load_library`) and writes each spec into `node_specs` and each module into `blobs`, in one transaction. Immutability is enforced here, not just by convention: each row records the digest of the spec as the API serializes it (so reformatting `spec.json` isn't a change) and of its module, and if `fastqc/0.1.0` already exists with different content, startup fails ("published versions never change, so publish the change as a new version") and nothing is written.
 
 **Datasets and input digests.** A digest can only be computed by something that reads the bytes, and the control plane never does (§4).
 
@@ -365,7 +365,7 @@ Compilation happens synchronously inside the request: the compiler takes millise
 **Build order** (one PR each, against `main`):
 
 1. **Built.** `protocol`: lease, heartbeat and result messages (`lease.rs`); blob and tree types (`blob.rs`) with the hasher moved into `protocol` so the API and agent share it; the versioning rules (`version.rs`), with `format_version` on `job.json` and `result.json`.
-2. The `api` crate skeleton: axum, sqlx, migrations, configuration, a health check, loading the node library into Postgres.
+2. **Built.** The `api` crate skeleton: axum, sqlx, migrations (embedded in the binary), configuration from flags or environment variables, `GET /healthz` (which also checks the database), graceful shutdown on Ctrl-C or SIGTERM, and loading the node library into Postgres with immutability enforced. Queries are runtime-checked (`sqlx::query`) for now: sqlx's compile-time checking (`query!`) needs a database or saved query metadata at build time, which can be added once there are enough queries to justify it. sqlx 0.9 accepts only `&'static str` SQL unless explicitly marked reviewed, so queries can't be assembled from runtime strings.
 3. The queue module and agent endpoints, with the reaper, tested against a real Postgres.
 4. The UI endpoints: validate, pipelines, datasets, launch, run status, cancel.
 5. `agent serve`: the polling loop, blob fetching and cache, the heartbeat task, posting results.
