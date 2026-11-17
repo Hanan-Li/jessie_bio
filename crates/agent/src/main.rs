@@ -34,6 +34,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use protocol::digest::HashAlgorithm;
 use protocol::result::{JobResult, JobStatus, TaskStatus};
+use protocol::version::FormatVersion;
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::run::{Outcome, StopReason};
@@ -248,6 +249,7 @@ async fn finish(
     };
 
     let result = JobResult {
+        format_version: FormatVersion::current(),
         status,
         tasks,
         outputs,
@@ -369,6 +371,7 @@ mod tests {
             project: run.path().join("project"),
             run_dir: run.path().to_path_buf(),
             interface: JobInterface {
+                format_version: FormatVersion::current(),
                 inputs: vec![],
                 outputs: vec![],
             },

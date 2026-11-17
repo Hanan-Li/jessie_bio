@@ -9,6 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, bail, ensure};
 
 use crate::spec::{Execution, NodeSpec};
+use crate::types::SemanticType;
 
 /// One node version from the library: its spec, the directory holding its
 /// files, and (for batch nodes) the Nextflow module's source text, which
@@ -51,6 +52,15 @@ fn load_node(dir: &Path) -> anyhow::Result<LibraryNode> {
         spec.id,
         spec.version
     );
+    // Readers of other programs' documents map formats they don't know to
+    // `Unknown`; in a curated spec that can only be a typo.
+    for port in spec.inputs.iter().chain(&spec.outputs) {
+        ensure!(
+            port.ty != SemanticType::Unknown,
+            "port `{}` has a format this compiler doesn't know",
+            port.name
+        );
+    }
 
     let mut module_source = None;
     if let Execution::Batch { module } = &spec.execution {
@@ -172,6 +182,20 @@ mod tests {
         let spec = batch_spec("tool", "1.0.0", "TOOL", "main.nf");
         let root = library_with("tool", "1.0.0", &spec, "process OTHER {\n}\n");
         assert!(error_of(&root).contains("does not declare `process TOOL {`"));
+    }
+
+    #[test]
+    fn rejects_a_port_with_an_unknown_format() {
+        let spec = serde_json::json!({
+            "id": "tool",
+            "version": "1.0.0",
+            "execution": { "class": "batch", "module": { "process": "TOOL", "file": "main.nf" } },
+            "inputs": [{ "name": "reads", "type": { "format": "fastqq" }, "cardinality": "per_sample" }],
+            "outputs": [],
+        })
+        .to_string();
+        let root = library_with("tool", "1.0.0", &spec, "process TOOL {\n}\n");
+        assert!(error_of(&root).contains("port `reads` has a format this compiler doesn't know"));
     }
 
     #[test]

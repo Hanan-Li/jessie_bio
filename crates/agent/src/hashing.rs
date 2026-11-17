@@ -5,16 +5,15 @@
 //! pool (`spawn_blocking`) rather than on the async threads, which must stay
 //! free to service streams and timers.
 //!
-//! Adding an algorithm: a variant in `protocol::digest::HashAlgorithm`, and
-//! a variant plus match arms in `Hasher` below.
+//! The hash itself is `protocol::digest::Hasher`, shared with the API, so
+//! both sides compute digests the same way.
 
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use protocol::digest::{Digest, HashAlgorithm};
-use sha2::Digest as _;
+use protocol::digest::{Digest, HashAlgorithm, Hasher};
 
 const CHUNK: usize = 1 << 20; // 1 MiB
 
@@ -43,35 +42,7 @@ fn hash_file_blocking(path: &Path, algorithm: HashAlgorithm) -> anyhow::Result<(
         hasher.update(&buffer[..read]);
         size += read as u64;
     }
-    Ok((hasher.finish()?, size))
-}
-
-/// One running hash, whatever the algorithm.
-enum Hasher {
-    Sha256(sha2::Sha256),
-}
-
-impl Hasher {
-    fn new(algorithm: HashAlgorithm) -> Hasher {
-        match algorithm {
-            HashAlgorithm::Sha256 => Hasher::Sha256(sha2::Sha256::new()),
-        }
-    }
-
-    fn update(&mut self, bytes: &[u8]) {
-        match self {
-            Hasher::Sha256(hasher) => hasher.update(bytes),
-        }
-    }
-
-    /// `self` by value: finishing consumes the hasher, so it can't be
-    /// updated again afterwards. The compiler enforces that.
-    fn finish(self) -> anyhow::Result<Digest> {
-        let (algorithm, bytes) = match self {
-            Hasher::Sha256(hasher) => (HashAlgorithm::Sha256, hasher.finalize().to_vec()),
-        };
-        Digest::from_bytes(algorithm, &bytes).map_err(anyhow::Error::msg)
-    }
+    Ok((hasher.finish(), size))
 }
 
 #[cfg(test)]
@@ -109,7 +80,7 @@ mod tests {
         let bytes: Vec<u8> = (0..(CHUNK * 5 / 2)).map(|i| (i % 251) as u8).collect();
         let (digest, size) = hash_bytes(&bytes).await;
 
-        let expected = sha2::Sha256::digest(&bytes);
+        let expected = <sha2::Sha256 as sha2::Digest>::digest(&bytes);
         assert_eq!(
             digest,
             Digest::from_bytes(HashAlgorithm::Sha256, &expected).unwrap()

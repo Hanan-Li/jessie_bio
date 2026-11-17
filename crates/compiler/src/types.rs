@@ -16,6 +16,10 @@ pub use protocol::types::{Cardinality, SemanticType};
 ///   cannot feed a port that needs "sorted".
 /// - Formats without qualifiers connect when the formats are the same.
 pub fn can_connect(output: &SemanticType, input: &SemanticType) -> bool {
+    // A format from a newer document never connects, not even to itself.
+    if *output == SemanticType::Unknown || *input == SemanticType::Unknown {
+        return false;
+    }
     match (output, input) {
         (
             &SemanticType::Fastq { paired: out_paired },
@@ -46,6 +50,13 @@ mod tests {
 
     fn bam(sorted: bool, indexed: bool) -> SemanticType {
         SemanticType::Bam { sorted, indexed }
+    }
+
+    #[test]
+    fn unknown_formats_never_connect() {
+        let unknown = SemanticType::Unknown;
+        assert!(!can_connect(&unknown, &unknown));
+        assert!(!can_connect(&unknown, &SemanticType::QcReport));
     }
 
     #[test]

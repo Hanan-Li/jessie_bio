@@ -7,10 +7,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::Digest;
 use crate::types::{Cardinality, SemanticType};
+use crate::version::FormatVersion;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct JobResult {
+    #[serde(default)]
+    pub format_version: FormatVersion,
     pub status: JobStatus,
     /// One record per Nextflow task, from its trace file. Empty if Nextflow
     /// failed before starting any task.
@@ -24,8 +26,10 @@ pub struct JobResult {
     pub warnings: Vec<String>,
 }
 
+/// No fallback: the control plane acts on this (retry, unblock, fail), so a
+/// new status is a breaking change (DESIGN.md §4.1, versioning rule 5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum JobStatus {
     Succeeded,
     /// Nextflow exited non-zero. If a task failed, `tasks` says which;
@@ -50,12 +54,13 @@ pub enum TaskStatus {
     Failed,
     /// Stopped because the run was stopped.
     Aborted,
-    /// Anything else Nextflow reports.
+    /// Anything else Nextflow reports, and any status added in a later
+    /// format: informational, so old readers fall back instead of failing.
+    #[serde(other)]
     Other,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TaskRecord {
     pub task_id: u64,
     /// Nextflow's task hash, e.g. `4e/01d43c`: also its work subdirectory.
@@ -75,7 +80,6 @@ pub struct TaskRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct OutputResult {
     /// The data name, `<node>__<port>`.
     pub name: String,
@@ -88,7 +92,6 @@ pub struct OutputResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct OutputFile {
     /// Set for per-sample outputs.
     pub sample: Option<String>,
@@ -105,6 +108,7 @@ mod tests {
     #[test]
     fn json_shape() {
         let result = JobResult {
+            format_version: FormatVersion::current(),
             status: JobStatus::Failed { exit_code: Some(1) },
             tasks: vec![TaskRecord {
                 task_id: 1,
@@ -148,5 +152,17 @@ mod tests {
             format!("sha256:{}", "00".repeat(32))
         );
         assert_eq!(serde_json::from_value::<JobResult>(json).unwrap(), result);
+    }
+
+    #[test]
+    fn unknown_task_statuses_fall_back_to_other() {
+        let status: TaskStatus = serde_json::from_str("\"preempted\"").unwrap();
+        assert_eq!(status, TaskStatus::Other);
+    }
+
+    #[test]
+    fn unknown_job_statuses_are_refused() {
+        let json = serde_json::json!({ "status": "preempted" });
+        assert!(serde_json::from_value::<JobStatus>(json).is_err());
     }
 }
