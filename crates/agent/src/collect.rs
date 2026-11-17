@@ -146,6 +146,7 @@ mod tests {
 
     use protocol::job::{JobInterface, JobOutput};
     use protocol::types::SemanticType;
+    use protocol::version::FormatVersion;
 
     use super::*;
 
@@ -171,6 +172,7 @@ mod tests {
             project: run.path().join("project"),
             run_dir: run.path().to_path_buf(),
             interface: JobInterface {
+                format_version: FormatVersion::current(),
                 inputs: vec![],
                 outputs,
             },

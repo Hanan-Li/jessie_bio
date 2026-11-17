@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use petgraph::Direction::Incoming;
 use petgraph::visit::EdgeRef;
 use protocol::job::{InputSource, JobInput, JobInterface, JobOutput, data_name};
+use protocol::version::FormatVersion;
 
 use crate::execution_plan::{ExecutionPlan, JobId};
 
@@ -87,6 +88,7 @@ impl ExecutionPlan {
         }
 
         JobInterface {
+            format_version: FormatVersion::current(),
             inputs: inputs.into_values().collect(),
             outputs: outputs.into_values().collect(),
         }

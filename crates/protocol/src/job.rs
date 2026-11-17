@@ -11,6 +11,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::types::{Cardinality, SemanticType};
+use crate::version::FormatVersion;
 
 /// A job's position in its execution plan.
 ///
@@ -29,8 +30,10 @@ pub fn data_name(node: &str, port: &str) -> String {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct JobInterface {
+    /// `job.json` is read by agents deployed separately from the compiler.
+    #[serde(default)]
+    pub format_version: FormatVersion,
     /// Sorted by name.
     pub inputs: Vec<JobInput>,
     /// Every output port of every node in the job, sorted by name. All are
@@ -40,7 +43,6 @@ pub struct JobInterface {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct JobInput {
     /// The data's name, and the Nextflow parameter that receives the path
     /// to its manifest.
@@ -55,7 +57,7 @@ pub struct JobInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "from", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "from", rename_all = "snake_case")]
 pub enum InputSource {
     /// An input port nothing on the canvas feeds. The run supplies it, e.g.
     /// the reads from the samplesheet.
@@ -69,7 +71,6 @@ pub enum InputSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct JobOutput {
     pub name: String,
     pub node: String,
@@ -86,6 +87,7 @@ mod tests {
     #[test]
     fn interface_json_shape() {
         let interface = JobInterface {
+            format_version: FormatVersion::current(),
             inputs: vec![JobInput {
                 name: data_name("fastqc_1", "reads"),
                 cardinality: Cardinality::PerSample,
@@ -103,6 +105,7 @@ mod tests {
         assert_eq!(
             json,
             serde_json::json!({
+                "format_version": 1,
                 "inputs": [{
                     "name": "fastqc_1__reads",
                     "cardinality": "per_sample",

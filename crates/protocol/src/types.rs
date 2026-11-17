@@ -9,8 +9,14 @@ use serde::{Deserialize, Serialize};
 ///
 /// In JSON the `format` field picks the variant and any qualifiers sit
 /// beside it: `{"format": "fastq", "paired": true}`.
+///
+/// Formats are added whenever a node with a new kind of data arrives, so an
+/// unrecognised format reads as `Unknown` instead of failing (otherwise
+/// every new format would force an agent upgrade). `Unknown` only ever
+/// comes from reading a newer document: the node library rejects it in
+/// specs, and `can_connect` never connects it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "format", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "format", rename_all = "snake_case")]
 pub enum SemanticType {
     Fastq {
         paired: bool,
@@ -29,6 +35,9 @@ pub enum SemanticType {
     HtmlReport,
     /// A rendered result: Vega-Lite spec plus its data (DESIGN.md §3.7).
     ReportArtifact,
+    /// A format this build doesn't know (from a newer document).
+    #[serde(other)]
+    Unknown,
 }
 
 /// Whether a port carries one item per sample or one item for the whole dataset.
@@ -60,9 +69,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_format() {
-        let result = serde_json::from_str::<SemanticType>(r#"{"format": "cram"}"#);
-        assert!(result.is_err());
+    fn an_unknown_format_reads_as_unknown() {
+        let ty: SemanticType = serde_json::from_str(r#"{"format": "cram", "level": 3}"#).unwrap();
+        assert_eq!(ty, SemanticType::Unknown);
     }
 
     #[test]

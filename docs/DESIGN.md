@@ -241,13 +241,13 @@ Short polling with backoff first; long polling (the server holds the request unt
 | `lease` | `job_id`, `attempt` (the fencing token), `expires_at`, `heartbeat_every_secs` (server-tunable without upgrading agents) |
 | `run` | `run_id` and the job's index in its plan, for logs and the agent's directories |
 | `settings` | Nextflow version, hash algorithm, time limit: decided per compute environment by the control plane, no longer agent constants or CLI flags |
-| `project` | The project's tree digest and its listing, path → `{digest, size}` (below) |
+| `project` | The project's tree as `{digest, size}` (below). The agent fetches the tree like any blob, so everything it acts on was checked against a hash; an inline listing would have raised the question of whether it matched its digest. |
 | `interface` | The `JobInterface` (`job.json`) |
 | `inputs` | Each job input, **already resolved** by the scheduler (`from: run` → the dataset's files; `from: job` → the files recorded in that earlier job's result), as `{sample, uri, digest}` records. Digests let the agent verify inputs against what was registered; when to pay for that hashing is a policy for later. The agent writes the CSV manifests for Nextflow itself. |
 
 The agent writes all of this to disk in the layout local mode reads today (`jobs/<job_id>/<attempt>/`), then runs the unchanged stage → run → collect code. Local mode becomes the special case where the lease came from a directory.
 
-*Project files by digest, like Bazel's content-addressable store.* Each project file is a **blob** stored under its own digest, so a module shared by many projects (FastQC 0.1.0) is stored and downloaded once. A project is a **tree** listing path → `{digest, size}`; the tree is itself a blob, and its digest is the project's digest (a Merkle tree, like git trees, OCI manifests and Bazel's `Directory` messages). The lease carries the tree; the agent fetches only the blobs it lacks (`GET /api/agent/blobs/{digest}`).
+*Project files by digest, like Bazel's content-addressable store.* Each project file is a **blob** stored under its own digest, so a module shared by many projects (FastQC 0.1.0) is stored and downloaded once. A project is a **tree** listing path → `{digest, size}`; the tree is itself a blob, and its digest is the project's digest (a Merkle tree, like git trees, OCI manifests and Bazel's `Directory` messages). The lease carries the tree's reference; the agent fetches the tree and then only the blobs it lacks (`GET /api/agent/blobs/{digest}`). Tree paths are checked on both sides (relative, `/`-separated, no empty, `.` or `..` parts), because the agent writes files at those paths: a tree can never make it write outside its directory.
 
 - Blobs never change, so they can be cached forever (HTTP `Cache-Control: immutable`, the digest as ETag), including by proxies.
 - The agent hashes every blob it receives and rejects a mismatch; the size catches truncation early and lets it refuse oversized blobs.
@@ -265,9 +265,11 @@ The agent writes all of this to disk in the layout local mode reads today (`jobs
 2. Fields are only ever **added, each with a default** (`#[serde(default)]`).
 3. Fields are **never renamed or removed**, and their meaning never changes; to change one, add a new field and retire the old.
 4. **`format_version`** is an integer, bumped only for breaking changes; a reader that gets a newer version than it understands refuses the message with a clear "upgrade the agent" error instead of misreading it.
-5. **New enum variants** break old readers even when unknown fields are ignored. Per enum: an `Unknown` fallback (`#[serde(other)]`) where a value is informational, such as task statuses; a `format_version` bump where the reader must act on it.
+5. **New enum variants** break old readers even when unknown fields are ignored. Per enum: an `Unknown` fallback (`#[serde(other)]`) where a value is informational, such as task statuses; a `format_version` bump where the reader must act on it (job statuses, heartbeat actions, hash algorithms, cardinalities, input sources).
 
-The canvas and node specs stay strict (`deny_unknown_fields`): the canvas is untrusted input, specs are curated in this repo, and a typo in either should fail loudly. These rules are implemented with the P0c `protocol` types, when `job.json` and `result.json` also gain `format_version`.
+   Semantic types get a fallback too (`SemanticType::Unknown`): formats are added whenever a node with a new kind of data arrives, and making each one a breaking change would force an agent upgrade for every new node. `Unknown` only ever comes from reading a newer document: the node library rejects it in specs, and `can_connect` never connects it.
+
+The canvas and node specs stay strict (`deny_unknown_fields`): the canvas is untrusted input, specs are curated in this repo, and a typo in either should fail loudly. Implemented in `protocol` (P0c PR 1): `FormatVersion` refuses a newer version during deserialization, so every reader gets the check without calling anything; a missing field means version 1, not "current", so old files keep reading as what they are. `job.json` and `result.json` carry `format_version`.
 
 ### 4.2 Deployment tiers (sovereignty model)
 
@@ -362,7 +364,7 @@ Compilation happens synchronously inside the request: the compiler takes millise
 
 **Build order** (one PR each, against `main`):
 
-1. `protocol`: lease, heartbeat and result messages; blob and tree types; the versioning rules, with `format_version` added to `job.json` and `result.json`.
+1. **Built.** `protocol`: lease, heartbeat and result messages (`lease.rs`); blob and tree types (`blob.rs`) with the hasher moved into `protocol` so the API and agent share it; the versioning rules (`version.rs`), with `format_version` on `job.json` and `result.json`.
 2. The `api` crate skeleton: axum, sqlx, migrations, configuration, a health check, loading the node library into Postgres.
 3. The queue module and agent endpoints, with the reaper, tested against a real Postgres.
 4. The UI endpoints: validate, pipelines, datasets, launch, run status, cancel.
@@ -574,7 +576,7 @@ Compute-environment-scoped tokens; separate `/api/agent/*` surface limited to: l
 | Backend language | **Rust 1.98** (pinned in `rust-toolchain.toml`), one Cargo workspace: `compiler`, `agent`, `protocol` (built); `api` (P0c) | Compiler must live in the control plane; one language means no seam through it. Node science is containerized, so platform language is independent of the bioinformatics ecosystem. |
 | API | axum + sqlx (compile-time-checked SQL, sqlx migrations), utoipa → OpenAPI → generated TS client | Mainstream Rust web stack; typed end to end |
 | Compiler | Rust crate: serde (canvas JSON), petgraph (DAG, segmentation, descendants), minijinja (DSL2 codegen), clap (`compiler` CLI) | Exhaustive `match` over the semantic type system |
-| Protocol | Rust crate shared by compiler, agent and API: serde, csv. Job interfaces (`job.json`), manifests, digests, job results (`result.json`), port types; in P0c also the lease, heartbeat and result messages and blob/tree types (adding sha2) | Formats that cross process boundaries are defined once, so both sides agree at compile time; versioned per §4.1 |
+| Protocol | Rust crate shared by compiler, agent and API: serde, csv, sha2. Job interfaces (`job.json`), manifests, digests and the shared hasher, job results (`result.json`), port types, the agent messages (lease, heartbeat, result), blobs and trees, format versions | Formats that cross process boundaries are defined once, so both sides agree at compile time; versioned per §4.1 |
 | DB | Managed Postgres (Neon or RDS) | Single stateful system: app data + queue + provenance |
 | Queue | Postgres SKIP LOCKED (§6), workers as tokio tasks | No broker to operate |
 | Auth | Clerk (or Cognito); WorkOS for SSO when demanded | Buy, don't build |

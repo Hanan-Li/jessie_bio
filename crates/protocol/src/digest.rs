@@ -9,7 +9,11 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// No `Unknown` fallback: a reader that doesn't know an algorithm can't
+/// verify anything with it, so a new algorithm is a breaking change
+/// (DESIGN.md §4.1, versioning rule 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum HashAlgorithm {
     Sha256,
 }
@@ -101,6 +105,54 @@ impl FromStr for Digest {
     }
 }
 
+/// A running hash, whatever the algorithm: feed it bytes in any number of
+/// pieces, then `finish`. The agent uses it to hash multi-GB files in
+/// chunks; `digest_bytes` uses it for blobs already in memory.
+///
+/// Adding an algorithm: a variant here and in `HashAlgorithm`, plus the
+/// match arms below.
+pub struct Hasher {
+    state: HasherState,
+}
+
+enum HasherState {
+    Sha256(sha2::Sha256),
+}
+
+impl Hasher {
+    pub fn new(algorithm: HashAlgorithm) -> Hasher {
+        let state = match algorithm {
+            HashAlgorithm::Sha256 => HasherState::Sha256(<sha2::Sha256 as sha2::Digest>::new()),
+        };
+        Hasher { state }
+    }
+
+    pub fn update(&mut self, bytes: &[u8]) {
+        match &mut self.state {
+            HasherState::Sha256(hasher) => sha2::Digest::update(hasher, bytes),
+        }
+    }
+
+    /// `self` by value: finishing consumes the hasher, so it can't be
+    /// updated again afterwards. The compiler enforces that.
+    pub fn finish(self) -> Digest {
+        let (algorithm, bytes) = match self.state {
+            HasherState::Sha256(hasher) => (
+                HashAlgorithm::Sha256,
+                sha2::Digest::finalize(hasher).to_vec(),
+            ),
+        };
+        Digest::from_bytes(algorithm, &bytes).expect("a hash function's output has its own length")
+    }
+}
+
+/// Hash bytes already in memory.
+pub fn digest_bytes(algorithm: HashAlgorithm, bytes: &[u8]) -> Digest {
+    let mut hasher = Hasher::new(algorithm);
+    hasher.update(bytes);
+    hasher.finish()
+}
+
 // In JSON a digest is one string, "sha256:...". Rather than deriving,
 // serde is told to go through Display and FromStr.
 impl Serialize for Digest {
@@ -128,6 +180,29 @@ mod tests {
         let text = digest.to_string();
         assert_eq!(text, format!("sha256:{ABC}"));
         assert_eq!(text.parse::<Digest>().unwrap(), digest);
+    }
+
+    #[test]
+    fn hashes_bytes_in_memory() {
+        assert_eq!(digest_bytes(HashAlgorithm::Sha256, b"abc").hex(), ABC);
+    }
+
+    #[test]
+    fn hashing_in_pieces_matches_hashing_in_one_go() {
+        let mut hasher = Hasher::new(HashAlgorithm::Sha256);
+        hasher.update(b"a");
+        hasher.update(b"");
+        hasher.update(b"bc");
+        assert_eq!(hasher.finish().hex(), ABC);
+    }
+
+    #[test]
+    fn algorithm_is_lowercase_in_json() {
+        assert_eq!(
+            serde_json::to_string(&HashAlgorithm::Sha256).unwrap(),
+            "\"sha256\""
+        );
+        assert!(serde_json::from_str::<HashAlgorithm>("\"blake3\"").is_err());
     }
 
     #[test]
