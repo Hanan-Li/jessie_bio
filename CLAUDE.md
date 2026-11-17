@@ -19,7 +19,7 @@ A no-code, scientist-focused bioinformatics platform: a visual pipeline builder 
   - `crates/compiler`: canvas → validated graph → jobs → Nextflow projects, plus the `compiler` CLI (serde, petgraph, minijinja, clap).
   - `crates/agent`: runs a compiled job and records the result, the `agent` CLI (tokio, nix, sha2, clap). Depends on `protocol`, never on `compiler`.
   - `crates/protocol`: formats that cross process boundaries: `job.json`, manifests, digests, `result.json`, port types (serde, csv).
-  - `crates/api` (P0c, not started): axum + sqlx + Postgres.
+  - `crates/api` (P0c, designed in `docs/DESIGN.md` §4.3, not started): axum + sqlx + Postgres; depends on `compiler` and `protocol`.
 - Node library: `nodes/<id>/<version>/` (spec.json, vendored nf-core module, UPSTREAM.md).
 - Frontend (later): Next.js + React Flow.
 - Workflow engine: Nextflow DSL2. Generated code targets strict syntax.
@@ -30,7 +30,7 @@ A no-code, scientist-focused bioinformatics platform: a visual pipeline builder 
 P0 is built inside-out:
 1. **P0a — compiler core** (done): canvas JSON → `PipelineGraph` (the IR) → segments → DSL2 text, with golden-file tests; `compiler` CLI.
 2. **P0b — agent in local mode** (done for batch jobs): `agent run` stages, runs and supervises Nextflow (clean stop on Ctrl-C, SIGTERM or a time limit), parses the trace, hashes outputs, writes output manifests and `result.json`.
-3. **P0c — control plane** (next; design walkthrough in progress: the agent protocol is decided in `docs/DESIGN.md` §4.1 and the queue in §6; the API side is next): axum + sqlx + queue; the agent leases jobs over HTTPS; GitHub Actions end-to-end test with Postgres and a real Nextflow run.
+3. **P0c — control plane** (next; designed in `docs/DESIGN.md`: agent protocol §4.1, control-plane API §4.3, queue §6; building in the order listed in §4.3): axum + sqlx + queue; the agent leases jobs over HTTPS; GitHub Actions end-to-end test with Postgres and a real Nextflow run.
 
 ## Conventions
 

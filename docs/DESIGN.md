@@ -288,6 +288,87 @@ Byte access from the browser:
 
 ---
 
+### 4.3 Control-plane API
+
+Designed 2026-11-16 for P0c; not built yet. The `api` crate is where everything meets: it calls the `compiler` crate as an in-process library (validation, planning, code generation), uses the `protocol` types for agent messages, and owns Postgres. The compiler stays pure; the agent still never depends on it.
+
+**Three kinds of caller, kept apart** (§8.3, "agents are not users"):
+
+| Caller | Credential | Endpoints |
+|---|---|---|
+| The UI (a scientist's browser) | A user token: in P0c one **development token**; Clerk sessions from P1 | `/api/*` except `/api/agent/*` |
+| An agent | An **agent token**, scoped to one compute environment | `/api/agent/*` only |
+| Setup and operations | Server-side commands | None: agent tokens are created by a setup command (later an admin screen); the node library is loaded when the API starts |
+
+Neither credential works on the other's endpoints. Agent calls are also scoped per request: a heartbeat or result is accepted only for a job leased to *that* agent with the current `attempt`, and `GET /api/agent/blobs/{digest}` serves only blobs referenced by jobs in that agent's compute environment, so a valid token can't read other projects' code by guessing digests. This matters most for on-prem agents, which run on machines we don't control.
+
+**P0c endpoints.** The minimum for an end-to-end run, shaped for the frontend so they need no redesign later. In P0c the UI endpoints are called by `curl`, scripts and the end-to-end test.
+
+| Endpoint | Caller | Purpose |
+|---|---|---|
+| `POST /api/validate { canvas }` | UI | Validate without storing: autosave and live error highlighting |
+| `POST /api/pipelines { name, canvas }` | UI | Validate and store an **immutable** pipeline version |
+| `POST /api/datasets` | UI | Register samples and their files (below) |
+| `POST /api/runs { pipeline_version_id, compute_env, inputs }` | UI | Launch a run; `inputs` maps each run input (`fastqc_1__reads`) to a dataset |
+| `GET /api/runs/{id}` | UI | Run state, jobs, task summaries, outputs with digests |
+| `POST /api/runs/{id}/cancel` | UI | Cancel (§6) |
+| `POST /api/agent/lease` | Agent | Poll for work (§4.1) |
+| `GET /api/agent/blobs/{digest}` | Agent | Fetch a project file it doesn't have cached |
+| `POST /api/agent/jobs/{id}/heartbeat` | Agent | Renew the lease; the reply may say "cancel" |
+| `POST /api/agent/jobs/{id}/result` | Agent | Report the `JobResult` |
+
+The UI will also need read endpoints the walking skeleton doesn't: the node palette (`GET /api/node-specs`), lists of pipelines, datasets and runs, reopening a saved pipeline, run logs, result downloads. They belong to the frontend API design that follows P0c, together with an OpenAPI description and a generated TypeScript client (utoipa, §9); request and response types will already be Rust structs.
+
+**Errors** use one JSON shape everywhere: `{ "error": { "code", "message", "details" } }`. Validation failures are `422` with every `ValidationError` in `details`, typed so the frontend can mark each broken node (`ValidationError` gains `Serialize`).
+
+**Launching a run** (`POST /api/runs`):
+
+1. Load the pipeline version's canvas (immutable) and the specs it uses.
+2. Validate (`validate(&canvas, &registry)`); on failure respond `422` with every error.
+3. Plan (`ExecutionPlan::build`); refuse the launch if the plan contains an analysis job (§6).
+4. For each job, generate its project (`nextflow_project`), store each file as a blob unless already stored (module blobs usually are), and store the tree (§4.1).
+5. Resolve the first jobs' inputs: each `from: run` input maps to the dataset named in the request, giving file URIs, digests and `pinned_agent` from where the files live.
+6. In one transaction: insert the run, all its jobs and their dependencies, and the resolved inputs; jobs without dependencies are `queued`, the rest `blocked`.
+7. Respond `201 { run_id }`; an agent picks the run up on its next poll.
+
+Compilation happens synchronously inside the request: the compiler takes milliseconds and does no I/O, and it keeps development simple. It can move to a background step if pipelines ever grow large enough to matter.
+
+**The node library at startup.** The API loads `nodes/` (`load_library`) and writes each spec and module into Postgres. Immutability is enforced here, not just by convention: if `fastqc/0.1.0` already exists with different content, startup fails with "version 0.1.0 changed; publish a new version".
+
+**Datasets and input digests.** A digest can only be computed by something that reads the bytes, and the control plane never does (§4).
+
+- **P0c (a stand-in):** a script computes digests with `sha256sum` and calls `POST /api/datasets` with the development token, naming the agent whose disk holds the files. It exercises the same tables and launch path as the real flow.
+
+  ```
+  POST /api/datasets { name, location: { agent_id }, samples: [
+    { sample: "gut", files: [ { uri: "/data/ggal/ggal_gut_1.fq", digest: "sha256:…", size: 691873 }, … ] } ] }
+  ```
+
+- **P1, with the samplesheet builder (§3.5): the inventory flow.** A browser can't read a lab server's disk, so the agent there does the reading:
+  1. The scientist picks a compute environment and a folder on it.
+  2. The API creates an **inventory request**, a second kind of agent work next to running jobs, delivered through the same lease (so a scan whose agent dies is retried like a job).
+  3. The agent lists the folder, hashes each file with the same code it uses for outputs, reports progress in its heartbeats ("hashing 14 of 48 files"), and returns `{path, size, digest}` for each.
+  4. The API stores each file as a FileRecord (§7) with its digest and the agent that holds it.
+  5. The samplesheet builder shows the files: R1/R2 pairs detected, sample names extracted, an editable grid for conditions and replicates, and warnings (a missing mate, a condition with one replicate).
+  6. "Create dataset" sends samples that point to **FileRecord IDs, never raw paths**: every file in a dataset was found and hashed by an agent, so paths can't be mistyped and digests can't be wrong.
+
+  Safeguards: agents list only **data roots** configured by the sysadmin at install (e.g. `/data/sequencing`), with paths fully resolved before the check, so `..` or a symbolic link can't escape; without this, any UI user could browse the server through the agent. Hashing costs roughly 30–60 s per 30 GB file per core, so the agent hashes in parallel and remembers digests per (path, size, modification time, inode), like git's index or Bazel's file digest cache, re-checking a file's digest when a run actually uses it.
+
+- **Managed tier: uploads.** A lab without a server uploads from the browser straight to the workspace's S3 bucket through short-lived upload URLs, so the bytes still bypass the API; an agent hashes each file on first use.
+
+**Kept out of P0c on purpose:** user accounts, projects and roles (P1; tables carry `project_id` from the start so adding them later reshapes nothing), the UI read endpoints and OpenAPI client (frontend API design), the inventory flow and samplesheet builder (P1).
+
+**End-to-end test in CI:** GitHub Actions starts Postgres as a service, the `api`, and an agent serving in a loop; the test launches the test canvas through the API, waits for `succeeded`, and checks the output digests. It uses **stub runs**: pulling the 1–3 GB images on every CI run would be slow. Real Docker runs remain a local check before merging.
+
+**Build order** (one PR each, against `main`):
+
+1. `protocol`: lease, heartbeat and result messages; blob and tree types; the versioning rules, with `format_version` added to `job.json` and `result.json`.
+2. The `api` crate skeleton: axum, sqlx, migrations, configuration, a health check, loading the node library into Postgres.
+3. The queue module and agent endpoints, with the reaper, tested against a real Postgres.
+4. The UI endpoints: validate, pipelines, datasets, launch, run status, cancel.
+5. `agent serve`: the polling loop, blob fetching and cache, the heartbeat task, posting results.
+6. The end-to-end test in CI.
+
 ## 5. Execution Model
 
 ### 5.1 Two execution classes
@@ -480,7 +561,7 @@ No policy engine. (1) A static permission matrix in code (`{"run.launch": {Edito
 
 ### 8.3 Agents are not users
 
-Compute-environment-scoped tokens; separate `/api/agent/*` surface limited to: lease jobs for own environment, report task state, upload artifacts for assigned runs. Agents can never browse project data — essential once agents run on-prem outside the trust boundary. Schema includes an optional per-environment project allowlist ("clinical projects only run on-prem"); UI for it deferred.
+Compute-environment-scoped tokens; separate `/api/agent/*` surface limited to: lease jobs for own environment, report task state, upload artifacts for assigned runs. Agents can never browse project data — essential once agents run on-prem outside the trust boundary. Schema includes an optional per-environment project allowlist ("clinical projects only run on-prem"); UI for it deferred. Concrete per-request scoping (heartbeats and results only for the agent's own lease and attempt, blobs only for its environment's jobs) is in §4.3.
 
 ---
 
@@ -513,7 +594,7 @@ Guiding principle: **buy everything that isn't the product.** The product is the
 
 - **P0a — compiler core. Done.** Pure Rust, no async/DB: canvas JSON → validated `PipelineGraph` → `ExecutionPlan` (convex segments) → job interfaces → Nextflow projects, plus the `compiler` CLI and the node library. Expected-output tests; generated code linted and stub-run by Nextflow in CI.
 - **P0b — agent, local mode. Done for batch jobs.** `agent check` / `stage` / `run`: preflight, staging, supervised Nextflow run with clean stopping, trace parsing, SHA-256 output hashes, output manifests and `result.json`. Verified with a real Docker run on the nextflow-io/rnaseq-nf test reads. A plain Linux process that runs a compiled segment with Nextflow's **local executor** + Docker, parses the trace file, hashes and stores outputs. No server. Kubernetes is deliberately not used here: where tasks run is a Nextflow executor setting (§5.4 level 1), so `k8s`, like Slurm and AWS Batch, is a later config option, not part of the agent's architecture.
-- **P0c — control plane. Next.** Design in progress: the agent protocol (leases, messages, project files by digest, local outputs, versioning) is decided in §4.1, and the queue (job and run states, transitions, retries, placement, why Postgres) in §6; the API side is next. axum + sqlx + SKIP LOCKED queue; agent switches from local mode to leasing over HTTPS. One GitHub Actions E2E test: Postgres service container + real tiny Nextflow run.
+- **P0c — control plane. Next.** Design in progress: the agent protocol (leases, messages, project files by digest, local outputs, versioning) is decided in §4.1, the queue (job and run states, transitions, retries, placement, why Postgres) in §6, and the control-plane API in §4.3. The design walkthrough is complete; building starts with the `protocol` messages (§4.3, build order). axum + sqlx + SKIP LOCKED queue; agent switches from local mode to leasing over HTTPS. One GitHub Actions E2E test: Postgres service container + real tiny Nextflow run.
 
 **P1 — MVP: RNA-seq vertical slice, managed tier only.**
 
@@ -554,7 +635,8 @@ Guiding principle: **buy everything that isn't the product.** The product is the
 - Multi-cloud (GCP) support order
 - Node marketplace / cross-workspace template sharing
 - Parameter design: a schema per node spec, how codegen passes values to modules, and how they enter the cache key. Until then validation rejects parameters.
-- The API side of P0c: creating a run from a canvas (calling the compiler, storing projects as blobs and trees, resolving the first jobs' inputs), and how the frontend will call it. Next in the design walkthrough.
+- The frontend API design after P0c: read endpoints for the UI, an OpenAPI description and a generated TypeScript client (§4.3).
+- The inventory flow and samplesheet builder back end (P1, designed in §4.3).
 - Upload of outputs to workspace storage (customer storage or S3), which lifts the rule that dependent jobs run where their inputs are.
 - (Decided 2026-11-13: protocol versioning, now in §4.1.)
 
