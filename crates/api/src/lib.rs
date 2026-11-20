@@ -1,11 +1,19 @@
-//! The control plane (DESIGN.md §4.3, §6): the HTTP API, and later the job
-//! queue and scheduler, all backed by Postgres.
+//! The control plane (DESIGN.md §4.3, §6): the HTTP API, the job queue
+//! and its reaper, all backed by Postgres.
 //!
-//! P0c PR 2 is the skeleton: configuration, the database and its
-//! migrations, loading the node library, and a health check.
+//! - P0c PR 2, the skeleton: configuration, the database and its
+//!   migrations, loading the node library, and a health check.
+//! - P0c PR 3: the queue (`queue`), agents and their tokens (`agents`),
+//!   the agent endpoints (`agent_api`), blobs (`blobs`) and the reaper.
 
+pub mod agent_api;
+pub mod agents;
+pub mod blobs;
 pub mod error;
 pub mod node_library;
+pub mod queue;
+#[cfg(test)]
+mod testing;
 
 use axum::extract::State;
 use axum::routing::get;
@@ -30,12 +38,30 @@ pub struct AppState {
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(health))
+        .merge(agent_api::routes())
         .with_state(state)
 }
 
 #[derive(Serialize)]
 struct Health {
     status: &'static str,
+}
+
+/// The reaper (DESIGN.md §6): every `every`, take back expired leases.
+/// Runs until the process exits. An error is logged and retried on the
+/// next tick: a database blip mustn't stop reaping for good.
+pub async fn run_reaper(pool: PgPool, every: std::time::Duration) {
+    let mut ticks = tokio::time::interval(every);
+    // If a tick is late (a slow reap), don't fire the missed ones in a burst.
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticks.tick().await;
+        match queue::reap(&pool).await {
+            Ok(0) => {}
+            Ok(count) => println!("reaper: took back {count} expired lease(s)"),
+            Err(error) => eprintln!("reaper: {error:#}"),
+        }
+    }
 }
 
 /// Healthy means "can serve requests": the process is up *and* the

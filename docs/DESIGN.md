@@ -213,13 +213,15 @@ Failures are typed, because each kind gets a different response: the environment
 
 Hashes are **self-describing**: `sha256:<hex>`, like container digests. The algorithm is an enum with one variant today; adding another (e.g. BLAKE3 for very large files) leaves old records readable.
 
-**Agent protocol (P0c).** Designed 2026-11-13; not built yet.
+**Agent protocol (P0c).** Designed 2026-11-13. The messages are built (`protocol`, PR 1) and so is the control plane's side (`api`, PR 3); the agent's side, `agent serve`, is PR 5.
 
 *Leases.* An agent doesn't own a job; it holds a **lease**: a time-limited claim ("mine until T") that it renews with heartbeats. A lease isn't the job's run time but how long the agent may go silent, so a 6-hour alignment simply keeps renewing. If heartbeats stop (crash, `kill -9`, lost power, network partition), the lease expires and the reaper returns the job to the queue (§6). This is the only way to tell a dead agent from a slow one. Same idea as Pub/Sub ack deadlines or SQS visibility timeouts.
 
 - **Fencing.** Every lease carries an `attempt` number, incremented on each acquire. Heartbeats and results must echo it, and the control plane accepts only the current one: an agent cut off by a partition, whose lease was reassigned, gets `409 Conflict`, stops its run, and discards its work.
 - **At-least-once.** A job can therefore run twice (the cut-off agent and its replacement). That must be harmless: outputs are content-addressed, and each attempt works in its own directory.
 - **One clock.** Expiry times come from Postgres's `now()`, never from an agent's clock.
+- **An expired lease that hasn't been reaped yet can still be renewed** (decided while building PR 3): the attempt is the fence, not the clock. Nobody else can hold the job until the reaper has moved it, and after that the attempt check fails. Refusing it would only turn a late heartbeat into lost work.
+- **Results are idempotent.** If the agent's first `result` call got through but the reply was lost, sending it again returns 200 and changes nothing; only a different agent or attempt gets `409`.
 - **Starting values:** lease 60 s, heartbeat every 20 s (two heartbeats can fail and the lease still holds), 3 attempts before a job is marked failed instead of retried, so a job that crashes agents can't take them all down in turn.
 - **Commands ride on heartbeats.** Agents only call out (no inbound connections), so "cancel" is the reply to the next heartbeat. In `supervise`, "cancel" and "lease lost" become two more branches of the stop future, alongside Ctrl-C, SIGTERM and the time limit.
 
@@ -249,7 +251,7 @@ The agent writes all of this to disk in the layout local mode reads today (`jobs
 
 *Project files by digest, like Bazel's content-addressable store.* Each project file is a **blob** stored under its own digest, so a module shared by many projects (FastQC 0.1.0) is stored and downloaded once. A project is a **tree** listing path → `{digest, size}`; the tree is itself a blob, and its digest is the project's digest (a Merkle tree, like git trees, OCI manifests and Bazel's `Directory` messages). The lease carries the tree's reference; the agent fetches the tree and then only the blobs it lacks (`GET /api/agent/blobs/{digest}`). Tree paths are checked on both sides (relative, `/`-separated, no empty, `.` or `..` parts), because the agent writes files at those paths: a tree can never make it write outside its directory.
 
-- Blobs never change, so they can be cached forever (HTTP `Cache-Control: immutable`, the digest as ETag), including by proxies.
+- Blobs never change, so they can be cached forever (HTTP `Cache-Control: private, max-age=31536000, immutable`, the digest as ETag). `private`, not `public`: a blob is served only to agents of environments whose jobs use it, so a shared proxy mustn't hand it to anyone else. Which blobs a tree lists is stored in `tree_entries`, so that check is one query.
 - The agent hashes every blob it receives and rejects a mismatch; the size catches truncation early and lets it refuse oversized blobs.
 - Agent cache: `~/.cache/jessie-agent/blobs/sha256/<2 hex>/<rest>`. Write to a temporary file, then rename into place, so a partial download is never visible; only verified bytes enter the cache.
 - Storage: a Postgres `blobs` table in P0c (a project is a few KB of text); S3 later behind the same endpoint, which can redirect.
@@ -292,7 +294,7 @@ Byte access from the browser:
 
 ### 4.3 Control-plane API
 
-Designed 2026-11-16 for P0c; not built yet. The `api` crate is where everything meets: it calls the `compiler` crate as an in-process library (validation, planning, code generation), uses the `protocol` types for agent messages, and owns Postgres. The compiler stays pure; the agent still never depends on it.
+Designed 2026-11-16 for P0c; being built (the build order is at the end of this section). The `api` crate is where everything meets: it calls the `compiler` crate as an in-process library (validation, planning, code generation), uses the `protocol` types for agent messages, and owns Postgres. The compiler stays pure; the agent still never depends on it.
 
 **Three kinds of caller, kept apart** (§8.3, "agents are not users"):
 
@@ -366,7 +368,7 @@ Compilation happens synchronously inside the request: the compiler takes millise
 
 1. **Built.** `protocol`: lease, heartbeat and result messages (`lease.rs`); blob and tree types (`blob.rs`) with the hasher moved into `protocol` so the API and agent share it; the versioning rules (`version.rs`), with `format_version` on `job.json` and `result.json`.
 2. **Built.** The `api` crate skeleton: axum, sqlx, migrations (embedded in the binary), configuration from flags or environment variables, `GET /healthz` (which also checks the database), graceful shutdown on Ctrl-C or SIGTERM, and loading the node library into Postgres with immutability enforced. Queries are runtime-checked (`sqlx::query`) for now: sqlx's compile-time checking (`query!`) needs a database or saved query metadata at build time, which can be added once there are enough queries to justify it. sqlx 0.9 accepts only `&'static str` SQL unless explicitly marked reviewed, so queries can't be assembled from runtime strings.
-3. The queue module and agent endpoints, with the reaper, tested against a real Postgres.
+3. **Built.** The queue module (`queue.rs`: `enqueue_run`, `acquire`, `heartbeat`, `complete`, `reap`, `cancel_run`), the four agent endpoints (`agent_api.rs`), agent tokens (`agents.rs`), and the reaper, a tokio task every 10 s. Tested against real Postgres (`#[sqlx::test]`), including 30 agents racing for 20 jobs and two results arriving at once. Agent tokens: `api create-compute-env` and `api create-agent` (which prints the token once); the database stores only the token's SHA-256, and tokens start with `jat_` so a leaked one is easy to spot. Launch isn't built yet, so `enqueue_run` is called only by tests until PR 4.
 4. The UI endpoints: validate, pipelines, datasets, launch, run status, cancel.
 5. `agent serve`: the polling loop, blob fetching and cache, the heartbeat task, posting results.
 6. The end-to-end test in CI.
@@ -447,7 +449,7 @@ Rules: never hold a queue transaction open during work (claim → commit → wor
 
 Implementation: hand-rolled with sqlx (~200 lines), so the queue and the agent API share one model and one set of types. Lease semantics are load-bearing enough that owning this code beats adopting a job-queue crate. All queue SQL lives in one module of the API crate (`acquire`, `heartbeat`, `complete`, `reap`, `cancel`); nothing else writes the `jobs` table.
 
-**Job states** (decided 2026-11-16; not built yet). A job is one entry of an `ExecutionPlan`: a segment or an analysis node.
+**Job states** (decided 2026-11-16; built in P0c PR 3). A job is one entry of an `ExecutionPlan`: a segment or an analysis node.
 
 | State | Meaning | Leaves by |
 |---|---|---|
@@ -466,7 +468,9 @@ Every transition is a conditional update (`UPDATE … WHERE id = $1 AND state = 
 4. **The reaper**: a tokio task in the API process, every ~10 s, handling expired leases. Safe with several API replicas, because it claims rows with `SKIP LOCKED` too.
 5. **Cancel** (the scientist): `blocked` and `queued` jobs → `cancelled` at once; `leased` jobs get `cancel_requested`, the next heartbeat reply says "cancel", and the agent's result moves the job to `cancelled`. If that agent is dead, the reaper sees the flag on the expired lease and cancels rather than requeues.
 
-Inputs are resolved when a job becomes `queued`, not when it is leased: the lease response is then a plain read, identical across retries.
+Inputs are resolved when a job becomes `queued`, not when it is leased: the lease response is then a plain read, identical across retries. A blocked job's `resolved_inputs` already holds its run inputs (from launch); queueing adds its `from: job` inputs, read from `job_outputs` in the order the agent reported them (R1 before R2).
+
+**One run, one writer at a time** (found while building PR 3). Every transaction that changes a run's jobs (a result, the reaper, cancel) first locks the run's row (`SELECT … FOR UPDATE`), always run before job, so they can't deadlock. Without it, when the last two jobs of a run finish at the same moment, each transaction sees the other job as unfinished (neither has committed yet), so neither queues the job that needs both, and neither marks the run succeeded: the run hangs. Postgres's default isolation, READ COMMITTED, gives each statement a fresh snapshot, so once the lock is held, the next statement sees what the previous holder committed. A test runs this race and fails if the lock is removed. Acquire and heartbeat change one job each and don't take the run lock, so the hot path never waits for it.
 
 **Retry policy.** Retry what the infrastructure broke; never retry what will fail the same way again.
 
@@ -482,11 +486,11 @@ At most 3 attempts (`max_attempts`); `interrupted` counts as an attempt, so an a
 
 **Run state** is stored on the run and updated in the same transaction as the job change behind it, not computed from jobs on every read (run lists are the most-viewed screen): `running` while any job is unfinished; `succeeded` when all jobs succeeded; `failed` as soon as one job fails, with every job downstream of it, directly or not, `skipped` while unrelated branches keep running; `cancelled` when the scientist cancels.
 
-**Placement.** While outputs stay on agents' disks (§4.1), resolving a job's inputs also fixes where it can run: if any input lives on agent A, the job gets `pinned_agent = A`, and acquire adds `AND (pinned_agent IS NULL OR pinned_agent = $agent_id)`. If A is gone for good, its outputs went with it: a pinned job left `queued` too long fails ("the agent holding this job's inputs is gone"), and only rerunning the upstream job helps. Uploading outputs to shared storage removes this limit.
+**Placement.** While outputs stay on agents' disks (§4.1), resolving a job's inputs also fixes where it can run: if any input lives on agent A, the job gets `pinned_agent = A`, and acquire adds `AND (pinned_agent IS NULL OR pinned_agent = $agent_id)`. If A is gone for good, its outputs went with it: a pinned job left `queued` too long fails ("the agent holding this job's inputs is gone"), and only rerunning the upstream job helps (not built yet: §12). If a job's inputs are on two different agents, no agent can run it, so it fails when it would be queued. Uploading outputs to shared storage removes both limits.
 
 **Analysis jobs** are rejected when a run is launched ("analysis jobs aren't supported yet"), as parameters are rejected at validation, rather than queued forever with no agent able to run them.
 
-**Tables** (a sketch):
+**Tables** (as built in `migrations/0002_queue.sql`; this is the outline):
 
 ```
 runs             (id, project_id, pipeline_version_id, state, created_at, finished_at)
@@ -497,8 +501,13 @@ jobs             (id, run_id, job_index, kind,
                   project_tree, interface, resolved_inputs,       -- what the lease response sends
                   result, failure_reason)                         -- outcome
 job_dependencies (job_id, depends_on_job_id)
-job_outputs      (job_id, name, sample, uri, digest, size, agent_id)   -- becomes FileRecords (§7)
+job_outputs      (job_id, name, position, sample, uri, digest, size, agent_id)   -- becomes FileRecords (§7)
+compute_envs     (id, nextflow_version, hash_algorithm, time_limit_secs)  -- the lease's settings
+agents           (id, name, compute_env, token_digest, agent_version, last_seen_at)
+tree_entries     (tree_digest, path, blob_digest)                       -- which blobs a project uses
 ```
+
+Check constraints make some bad states impossible to write: a `leased` job always has an agent and an expiry, and no other job has an expiry. Partial indexes cover the two queries that run constantly: queued jobs per environment, and leased jobs by expiry.
 
 **Why Postgres, and when to revisit.** The queue stays small because a job is a whole segment, minutes to hours long; per-sample tasks are scheduled by Nextflow inside it. Even at 10,000 runs a day × 5 jobs, that is about 0.6 jobs per second; the heaviest load is heartbeats, about 500 single-row updates per second with 10,000 jobs running at once. A well-provisioned Postgres commonly sustains thousands to tens of thousands of such updates per second. Airflow runs several schedulers on this same `SKIP LOCKED` pattern, and Temporal can run on Postgres: workflow state is a database problem first.
 
@@ -650,3 +659,5 @@ Guiding principle: **buy everything that isn't the product.** The product is the
 - The library loader doesn't check that process and port names are valid identifiers, or that a node's input and output port names differ (a shared name would give two pieces of data one name). Needed before third-party nodes (P3).
 - Staging treats every manifest path as a local path, so `s3://` URIs would be mangled. Needed with S3 storage.
 - When a run is stopped, the agent reports it about a second before Docker has removed the task container (§4.1).
+- A job pinned to an agent that is gone for good stays `queued` forever; it should fail after a while (§6, Placement).
+- The control plane polls: no `LISTEN/NOTIFY` long polling yet (§4.1). Agents' `last_seen_at` is recorded on each lease poll but nothing reads it yet (a "which agents are alive" view belongs to the UI).
