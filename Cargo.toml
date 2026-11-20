@@ -29,10 +29,12 @@ serde_json = "1"
 sha2 = "0.11"
 # Runtime-checked queries for now; compile-time checking (query!) needs a
 # database or saved metadata at build time, added later (DESIGN.md §4.3).
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate", "json"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate", "json", "uuid"] }
 tempfile = "3"
 thiserror = "2"
 tower = { version = "0.5", features = ["util"] }
+# Row ids in the API, and agent tokens (random v4 UUIDs).
+uuid = { version = "1", features = ["v4", "serde"] }
 # Only the parts the agent uses: the multi-threaded runtime, #[tokio::main],
 # child processes, files, timers and Ctrl-C.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "time", "signal", "io-util"] }

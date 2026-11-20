@@ -119,6 +119,31 @@ cargo run -p api          # needs DATABASE_URL; listens on http://127.0.0.1:8470
 curl localhost:8470/healthz
 ```
 
-On start it applies the database migrations and publishes the node library,
-refusing to start if `nodes/` changed a version that was already published.
-So far it serves only `/healthz`; the endpoints in DESIGN.md §4.3 follow.
+On start it applies the database migrations, publishes the node library
+(refusing to start if `nodes/` changed a version that was already published),
+and starts the reaper, which every 10 seconds takes back the leases of agents
+that went silent.
+
+Agents need a compute environment and a token:
+
+```bash
+cargo run -p api -- create-compute-env laptop --nextflow-version 26.10.5
+cargo run -p api -- create-agent laptop --name my-laptop   # prints the token, only once
+```
+
+The agent endpoints (DESIGN.md §4.1) take the token as `Authorization: Bearer <token>`:
+
+```bash
+curl -X POST localhost:8470/api/agent/lease \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"agent_version": "0.1.0"}'      # 204: nothing queued yet
+```
+
+| Endpoint | |
+|---|---|
+| `POST /api/agent/lease` | Lease the oldest queued job (200 with the job), or 204 |
+| `POST /api/agent/jobs/{id}/heartbeat` | Renew the lease; the reply says `continue` or `cancel`, 409 if the lease was lost |
+| `POST /api/agent/jobs/{id}/result` | Report the job's `result.json`; 409 if this attempt is no longer current |
+| `GET /api/agent/blobs/{digest}` | A project file, only for jobs in the agent's own environment |
+
+Nothing queues jobs yet: launching runs (`POST /api/runs`) is the next PR.

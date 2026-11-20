@@ -10,8 +10,10 @@ use anyhow::{Context, bail};
 use compiler::library::LibraryNode;
 use protocol::blob::Blob;
 use protocol::digest::{HashAlgorithm, digest_bytes};
+use sqlx::PgPool;
 use sqlx::types::Json;
-use sqlx::{PgPool, Postgres, Transaction};
+
+use crate::blobs::insert_blob;
 
 /// What a sync did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,21 +91,6 @@ pub async fn sync(
 
     tx.commit().await?;
     Ok(report)
-}
-
-/// Store a blob unless it's already there. Blobs are named by their
-/// content, so an existing row with this digest already has these bytes.
-async fn insert_blob(tx: &mut Transaction<'_, Postgres>, blob: &Blob) -> anyhow::Result<()> {
-    sqlx::query(
-        "INSERT INTO blobs (digest, size, bytes) VALUES ($1, $2, $3)
-         ON CONFLICT (digest) DO NOTHING",
-    )
-    .bind(blob.reference.digest.to_string())
-    .bind(i64::try_from(blob.reference.size)?)
-    .bind(&blob.bytes)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
 }
 
 #[cfg(test)]
