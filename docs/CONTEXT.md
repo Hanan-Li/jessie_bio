@@ -31,6 +31,7 @@ Background from the design and build conversations (2026-09-14 to 2026-11-11) th
 - **P0c agent protocol** (2026-11-13, design walkthrough): leases with fencing rather than ownership; one lease response carrying the whole job description, metadata only. David chose project files **by digest** over inline (inline would have been fine at 7 KB) to build the scaling path from the start, modelled on Bazel's CAS. Outputs stay on the agent's machine for now; uploads come later. Versioning: the protobuf-style rules proposed in the walkthrough.
 - **P0c queue** (2026-11-16, design walkthrough): retry only what the infrastructure broke, never deterministic failures; `interrupted` counts against the 3 attempts (David's call, so a constantly restarted agent can't hold a job forever); analysis jobs rejected at launch; run state stored. David asked whether Postgres scales or a distributed queue is needed: staying on Postgres, because jobs are whole segments and the queue sees under a job per second even at large scale; the scaling steps and the signals for revisiting are in DESIGN.md §6.
 - **P0c API** (2026-11-16, design walkthrough): David chose a development token instead of user accounts for P0c, stub runs in the CI end-to-end test (real Docker runs stay local), and compiling synchronously inside the launch request for ease of development. He asked how a scientist would actually provide a dataset from the UI; the answer, the agent-side inventory flow with the samplesheet builder, is designed for P1 (DESIGN.md §4.3), and P0c uses a script that computes digests with `sha256sum`.
+- **P0c queue, as built** (2026-11-20, PR 3): building it turned up a race the design hadn't named. When two jobs finish at once, each transaction can see the other as unfinished, so the job that needs both is never queued and the run hangs. The fix is to lock the run's row before changing its jobs (DESIGN.md §6, "One run, one writer at a time"). A test runs the race and fails without the lock. Also decided while building: an expired lease that hasn't been reaped yet can still be renewed, since the attempt number is the fence; repeating a result is answered with 200 rather than 409; blobs are served `private`; agent tokens are stored only as digests.
 
 ## Progress log
 
@@ -40,6 +41,7 @@ Dates are when the work reached `main`.
 - 2026-11-07: segmentation (#3); node library with vendored FastQC/MultiQC (#4); job interfaces, manifests and the `protocol` crate (#5); codegen and the `compiler` CLI with stub runs (#6, #7, landed via #8).
 - 2026-11-10: **first real run**: the compiled FastQC → MultiQC project on real reads with Docker.
 - 2026-11-11: the agent: preflight and staging (#9), `agent run` (#10), trace, hashes, output manifests and `result.json` (#11). Full review of P0a/P0b; fixes for stopping (#12) and parameters plus the README (#13). Remaining gaps: DESIGN.md §12.
+- 2026-11-13 to 2026-11-16: the P0c design: agent protocol (#15), queue and control-plane API (#16). P0c PR 1, the `protocol` messages (#17), and PR 2, the `api` skeleton (#18).
 
 ## Honest market assessment (2026-09-27)
 

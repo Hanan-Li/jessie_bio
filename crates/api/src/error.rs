@@ -35,6 +35,35 @@ impl ApiError {
         }
     }
 
+    /// The caller's own mistake, described to them: a request they should
+    /// not repeat unchanged.
+    pub fn client(status: StatusCode, code: &'static str, message: impl Into<String>) -> ApiError {
+        ApiError {
+            status,
+            code,
+            message: message.into(),
+            details: None,
+        }
+    }
+
+    pub fn unauthorized() -> ApiError {
+        ApiError::client(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "a valid agent token is required (Authorization: Bearer <token>)",
+        )
+    }
+
+    /// Also used for things that exist but belong to someone else, so a
+    /// caller can't learn what exists by probing.
+    pub fn not_found(what: &str) -> ApiError {
+        ApiError::client(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("{what} not found"),
+        )
+    }
+
     /// A bug or an unexpected failure. The cause goes to the log, not to
     /// the caller, so internal details never leak in a response.
     pub fn internal(cause: impl std::fmt::Display) -> ApiError {
@@ -45,6 +74,22 @@ impl ApiError {
             message: "internal error".to_string(),
             details: None,
         }
+    }
+}
+
+/// `From` lets `?` convert a database error into an `ApiError` inside a
+/// handler. Database errors are never the caller's fault here, so they
+/// become 500s with the cause logged.
+impl From<sqlx::Error> for ApiError {
+    fn from(error: sqlx::Error) -> ApiError {
+        ApiError::internal(error)
+    }
+}
+
+impl From<anyhow::Error> for ApiError {
+    fn from(error: anyhow::Error) -> ApiError {
+        // `{:#}` prints the whole chain of context, not just the outermost.
+        ApiError::internal(format!("{error:#}"))
     }
 }
 
