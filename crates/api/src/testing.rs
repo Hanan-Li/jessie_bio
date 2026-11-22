@@ -13,7 +13,7 @@ use axum::http::{Request, StatusCode, header};
 use compiler::library::load_library;
 use compiler::spec::SpecRegistry;
 use http_body_util::BodyExt;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use protocol::blob::BlobRef;
@@ -113,6 +113,23 @@ pub async fn call(
 pub fn test_canvas() -> Value {
     let text = include_str!("../../compiler/testdata/fastqc_multiqc.canvas.json");
     serde_json::from_str(text).unwrap()
+}
+
+/// A digest as JSON text, for request bodies.
+pub fn digest_of(text: &str) -> String {
+    digest_bytes(SHA, text.as_bytes()).to_string()
+}
+
+/// Register the paired reads of sample `gut` on `agent_id`, as
+/// `scripts/register-dataset.sh` would.
+pub async fn register_reads(state: &AppState, agent_id: Uuid) -> Reply {
+    let file = |name: &str| json!({ "uri": format!("/data/ggal/{name}"), "digest": digest_of(name), "size": 100 });
+    let body = json!({
+        "name": "ggal reads",
+        "location": { "agent_id": agent_id },
+        "samples": [{ "sample": "gut", "files": [file("ggal_gut_1.fq"), file("ggal_gut_2.fq")] }]
+    });
+    call(state, "POST", "/api/datasets", Some(DEV_TOKEN), Some(body)).await
 }
 
 pub const SHA: HashAlgorithm = HashAlgorithm::Sha256;

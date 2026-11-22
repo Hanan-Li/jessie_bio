@@ -18,12 +18,14 @@ crates/protocol/   formats shared by compiler, agent and API: job interfaces, ma
 nodes/             the node library: one directory per node version (spec, module, provenance)
 scripts/           stub-run.sh: compile the test canvas, lint it, stub-run it with the agent
                    dev-db.sh: start the development Postgres in Docker
+                   register-dataset.sh: hash files and register them as a dataset with the API
 ```
 
 ## Requirements
 
 - Rust (version pinned in `rust-toolchain.toml`; rustup installs it automatically)
 - Java 17+ and Nextflow 26.10.5, for anything that runs Nextflow
+- `curl` and `jq`, for `scripts/register-dataset.sh` (`sudo apt install jq`)
 - Docker, for real runs and the development database. Your user must be able
   to use it without `sudo`:
 
@@ -149,14 +151,31 @@ curl -X POST localhost:8470/api/agent/lease \
 
 The UI endpoints (DESIGN.md §4.3) take the development token instead: in
 P0c there are no user accounts, just the one token the server was started
-with. So far there is one, checking a canvas without storing it:
+with. With `$AGENT_ID` from `create-agent` above:
 
 ```bash
-curl -s -X POST localhost:8470/api/validate -H "Authorization: Bearer $JESSIE_DEV_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d "{\"canvas\": $(cat crates/compiler/testdata/fastqc_multiqc.canvas.json)}"
-# 200 {"valid": true}, or 422 listing every problem, each typed by `code`
+H="Authorization: Bearer $JESSIE_DEV_TOKEN"
+CANVAS=$(cat crates/compiler/testdata/fastqc_multiqc.canvas.json)
+
+# Check a canvas (stores nothing): 200 {"valid": true}, or 422 listing every problem.
+curl -s -X POST localhost:8470/api/validate -H "$H" -H 'Content-Type: application/json' \
+  -d "{\"canvas\": $CANVAS}"
+
+# Save it as a pipeline version (saving under the same name again makes version 2).
+curl -s -X POST localhost:8470/api/pipelines -H "$H" -H 'Content-Type: application/json' \
+  -d "{\"name\": \"QC\", \"canvas\": $CANVAS}"
+
+# Register the reads on the agent's disk: the script hashes them with sha256sum
+# and sends only paths, sizes and digests. One <sample>=<R1>,<R2> per sample.
+scripts/register-dataset.sh --name "ggal reads" --agent "$AGENT_ID" \
+  gut=data/ggal/ggal_gut_1.fq,data/ggal/ggal_gut_2.fq      # prints the dataset id
 ```
+
+| Endpoint | |
+|---|---|
+| `POST /api/validate` | Check a canvas without storing it; 422 lists every problem, typed by `code` |
+| `POST /api/pipelines` | Validate and store a canvas as the next version of a named pipeline |
+| `POST /api/datasets` | Register samples and their files (paths on one agent's disk, with digests) |
 
 Nothing queues jobs yet: launching runs (`POST /api/runs`) is coming in the
 next parts of P0c PR 4.

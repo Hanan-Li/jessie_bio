@@ -1,15 +1,19 @@
-//! Checking pipelines (DESIGN.md §4.3):
+//! Checking and saving pipelines (DESIGN.md §4.3):
 //!
 //! ```text
 //! POST /api/validate   { canvas }        → 200 { valid: true }, or 422 with every problem
+//! POST /api/pipelines  { name, canvas }  → 201 { pipeline_id, pipeline_version_id, version }
 //! ```
 //!
 //! Validate stores nothing: the canvas editor calls it on every change to
-//! highlight broken nodes. Saving pipelines comes in the next part of
-//! P0c PR 4.
+//! highlight broken nodes. Saving validates too and then stores the canvas
+//! as a new, **immutable** version of the named pipeline: a run records
+//! the exact version it ran, so changing a pipeline means a new version,
+//! never an edit.
 
 use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
+use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
 use compiler::canvas::Canvas;
@@ -17,13 +21,17 @@ use compiler::pipeline_graph::PipelineGraph;
 use compiler::spec::SpecRegistry;
 use compiler::validate::{ValidationError, validate};
 use serde::{Deserialize, Serialize};
+use sqlx::types::Json as JsonColumn;
+use uuid::Uuid;
 
 use crate::AppState;
 use crate::error::ApiError;
 use crate::users::User;
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/api/validate", post(validate_canvas))
+    Router::new()
+        .route("/api/validate", post(validate_canvas))
+        .route("/api/pipelines", post(create_pipeline))
 }
 
 /// `canvas` is typed: a body that isn't canvas-shaped (a misspelled
@@ -73,6 +81,77 @@ fn invalid_pipeline(errors: &[ValidationError]) -> ApiError {
         format!("the pipeline has {count} {problems}"),
         details.into(),
     )
+}
+
+#[derive(Deserialize)]
+struct CreatePipeline {
+    name: String,
+    canvas: Canvas,
+}
+
+#[derive(Serialize)]
+struct Created {
+    pipeline_id: Uuid,
+    pipeline_version_id: Uuid,
+    version: i32,
+}
+
+async fn create_pipeline(
+    State(state): State<AppState>,
+    _user: User,
+    body: Result<Json<CreatePipeline>, JsonRejection>,
+) -> Result<(StatusCode, Json<Created>), ApiError> {
+    let Json(request) = body?;
+    let name = request.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::client(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+            "a pipeline needs a name",
+        ));
+    }
+    // Only a valid canvas is ever stored, so every stored version can be
+    // launched (as long as its nodes stay published, which they do).
+    check(&request.canvas, &state.registry)?;
+
+    let mut tx = state.pool.begin().await?;
+    // Create the pipeline the first time its name is used. `DO NOTHING`
+    // rather than "look, then insert": two first saves at once can't both
+    // insert, because the unique index decides.
+    sqlx::query(
+        "INSERT INTO pipelines (name) VALUES ($1)
+         ON CONFLICT (project_id, name) DO NOTHING",
+    )
+    .bind(name)
+    .execute(&mut *tx)
+    .await?;
+    // Lock the pipeline's row, so two saves at once number their versions
+    // one after the other instead of both picking the same next number.
+    let pipeline_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM pipelines WHERE project_id IS NULL AND name = $1 FOR UPDATE",
+    )
+    .bind(name)
+    .fetch_one(&mut *tx)
+    .await?;
+    let (pipeline_version_id, version): (Uuid, i32) = sqlx::query_as(
+        "INSERT INTO pipeline_versions (pipeline_id, version, canvas)
+         SELECT $1, COALESCE(max(version), 0) + 1, $2 FROM pipeline_versions WHERE pipeline_id = $1
+         RETURNING id, version",
+    )
+    .bind(pipeline_id)
+    .bind(JsonColumn(&request.canvas))
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(Created {
+            pipeline_id,
+            pipeline_version_id,
+            version,
+        }),
+    ))
 }
 
 #[cfg(test)]
@@ -165,5 +244,46 @@ mod tests {
                 .unwrap()
                 .contains("edgse")
         );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn saving_again_makes_a_new_version(pool: PgPool) {
+        let state = ui_state(&pool).await;
+        let save = || Some(json!({ "name": "QC", "canvas": test_canvas() }));
+        let first = call(&state, "POST", "/api/pipelines", Some(DEV_TOKEN), save()).await;
+        assert_eq!(first.status, StatusCode::CREATED);
+        assert_eq!(first.json()["version"], 1);
+        let second = call(&state, "POST", "/api/pipelines", Some(DEV_TOKEN), save()).await;
+        assert_eq!(second.json()["version"], 2);
+        assert_eq!(first.json()["pipeline_id"], second.json()["pipeline_id"]);
+        assert_ne!(
+            first.json()["pipeline_version_id"],
+            second.json()["pipeline_version_id"]
+        );
+
+        let other = Some(json!({ "name": "Other", "canvas": test_canvas() }));
+        let other = call(&state, "POST", "/api/pipelines", Some(DEV_TOKEN), other).await;
+        assert_eq!(other.json()["version"], 1);
+        assert_ne!(other.json()["pipeline_id"], first.json()["pipeline_id"]);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn an_invalid_pipeline_is_not_stored(pool: PgPool) {
+        let state = ui_state(&pool).await;
+        let mut canvas = test_canvas();
+        canvas["nodes"][0]["version"] = json!("9.9.9");
+        let body = Some(json!({ "name": "QC", "canvas": canvas }));
+        let reply = call(&state, "POST", "/api/pipelines", Some(DEV_TOKEN), body).await;
+        assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        let blank = Some(json!({ "name": "  ", "canvas": test_canvas() }));
+        let reply = call(&state, "POST", "/api/pipelines", Some(DEV_TOKEN), blank).await;
+        assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM pipelines")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 0);
     }
 }
