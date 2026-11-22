@@ -1,9 +1,20 @@
-//! Shared test fixtures: a compute environment, agents, and runs shaped
-//! like the test canvas (FastQC, then MultiQC over its reports).
+//! Shared test fixtures: a compute environment, agents, runs shaped like
+//! the test canvas (FastQC, then MultiQC over its reports), the app state,
+//! and calling the HTTP API.
 //!
 //! Compiled only for `cargo test` (`#[cfg(test)]` on the `mod` line).
 
 use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::Arc;
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode, header};
+use compiler::library::load_library;
+use compiler::spec::SpecRegistry;
+use http_body_util::BodyExt;
+use serde_json::Value;
+use tower::ServiceExt;
 
 use protocol::blob::BlobRef;
 use protocol::digest::{HashAlgorithm, digest_bytes};
@@ -18,6 +29,91 @@ use uuid::Uuid;
 use crate::agents::{self, Agent, NewComputeEnv};
 use crate::blobs::store_tree;
 use crate::queue::{JobKind, NewJob, NewRun, enqueue_run};
+use crate::users::dev_token_digest;
+use crate::{AppState, app, node_library};
+
+/// The development token the UI tests' state accepts.
+pub const DEV_TOKEN: &str = "dev-token-for-tests";
+
+/// State for tests of the agent endpoints: no node library, no
+/// development token.
+pub fn bare_state(pool: &PgPool) -> AppState {
+    AppState {
+        pool: pool.clone(),
+        registry: Arc::new(SpecRegistry::default()),
+        dev_token: None,
+    }
+}
+
+/// State as the server builds it: the repo's node library published and
+/// read back, and [`DEV_TOKEN`] accepted.
+pub async fn ui_state(pool: &PgPool) -> AppState {
+    let nodes = load_library(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../nodes")).unwrap();
+    node_library::sync(pool, nodes, SHA).await.unwrap();
+    AppState {
+        pool: pool.clone(),
+        registry: Arc::new(node_library::load_registry(pool).await.unwrap()),
+        dev_token: Some(dev_token_digest(DEV_TOKEN)),
+    }
+}
+
+pub struct Reply {
+    pub status: StatusCode,
+    pub headers: axum::http::HeaderMap,
+    pub bytes: Vec<u8>,
+}
+
+impl Reply {
+    pub fn json(&self) -> Value {
+        serde_json::from_slice(&self.bytes).unwrap()
+    }
+}
+
+/// One request straight into the router (no network or port involved),
+/// with `token` as the bearer token.
+pub async fn call(
+    state: &AppState,
+    method: &str,
+    uri: &str,
+    token: Option<&str>,
+    body: Option<Value>,
+) -> Reply {
+    let mut request = Request::builder().method(method).uri(uri);
+    if let Some(token) = token {
+        request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    let body = match body {
+        Some(json) => {
+            request = request.header(header::CONTENT_TYPE, "application/json");
+            Body::from(json.to_string())
+        }
+        None => Body::empty(),
+    };
+    let response = app(state.clone())
+        .oneshot(request.body(body).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    Reply {
+        status,
+        headers,
+        bytes,
+    }
+}
+
+/// The compiler's test canvas: FastQC, then MultiQC over its reports.
+pub fn test_canvas() -> Value {
+    let text = include_str!("../../compiler/testdata/fastqc_multiqc.canvas.json");
+    serde_json::from_str(text).unwrap()
+}
 
 pub const SHA: HashAlgorithm = HashAlgorithm::Sha256;
 pub const ENV: &str = "laptop";

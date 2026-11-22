@@ -115,6 +115,7 @@ nextflow run main.nf --fastqc_1__reads /abs/path/reads.csv -output-dir results
 ## Run the API server
 
 ```bash
+export JESSIE_DEV_TOKEN=$(openssl rand -hex 16)   # opens the UI endpoints (below)
 cargo run -p api          # needs DATABASE_URL; listens on http://127.0.0.1:8470
 curl localhost:8470/healthz
 ```
@@ -146,4 +147,16 @@ curl -X POST localhost:8470/api/agent/lease \
 | `POST /api/agent/jobs/{id}/result` | Report the job's `result.json`; 409 if this attempt is no longer current |
 | `GET /api/agent/blobs/{digest}` | A project file, only for jobs in the agent's own environment |
 
-Nothing queues jobs yet: launching runs (`POST /api/runs`) is the next PR.
+The UI endpoints (DESIGN.md §4.3) take the development token instead: in
+P0c there are no user accounts, just the one token the server was started
+with. So far there is one, checking a canvas without storing it:
+
+```bash
+curl -s -X POST localhost:8470/api/validate -H "Authorization: Bearer $JESSIE_DEV_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"canvas\": $(cat crates/compiler/testdata/fastqc_multiqc.canvas.json)}"
+# 200 {"valid": true}, or 422 listing every problem, each typed by `code`
+```
+
+Nothing queues jobs yet: launching runs (`POST /api/runs`) is coming in the
+next parts of P0c PR 4.

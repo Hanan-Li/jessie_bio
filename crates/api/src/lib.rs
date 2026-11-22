@@ -5,19 +5,27 @@
 //!   migrations, loading the node library, and a health check.
 //! - P0c PR 3: the queue (`queue`), agents and their tokens (`agents`),
 //!   the agent endpoints (`agent_api`), blobs (`blobs`) and the reaper.
+//! - P0c PR 4, the UI endpoints, in parts. Part 1: the development token
+//!   (`users`) and validating a canvas (`pipelines`).
 
 pub mod agent_api;
 pub mod agents;
 pub mod blobs;
 pub mod error;
 pub mod node_library;
+pub mod pipelines;
 pub mod queue;
 #[cfg(test)]
 mod testing;
+pub mod users;
+
+use std::sync::Arc;
 
 use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
+use compiler::spec::SpecRegistry;
+use protocol::digest::Digest;
 use serde::Serialize;
 use sqlx::PgPool;
 
@@ -27,18 +35,31 @@ use crate::error::ApiError;
 /// API brings its own schema and needs no separate migration tool.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-/// What every handler can reach. `PgPool` is a cheap handle onto a shared
-/// pool of connections (internally an `Arc`), so cloning the state per
-/// request costs nothing.
+/// What every handler can reach. axum clones the state for each request,
+/// so everything in it must be cheap to clone:
+///
+/// - `PgPool` is a handle onto a shared pool of connections (internally an
+///   `Arc`).
+/// - The registry is wrapped in an `Arc` ("atomically reference-counted"):
+///   one registry in memory, and each clone is just another pointer to it
+///   plus a count, so cloning never copies the specs. `Arc` gives shared
+///   *read-only* access, which is all handlers need: the node library is
+///   only published at startup.
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
+    /// The published node specs and modules (`node_library::load_registry`).
+    pub registry: Arc<SpecRegistry>,
+    /// The development token's digest (`users`); `None` closes the UI
+    /// endpoints to everyone.
+    pub dev_token: Option<Digest>,
 }
 
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(health))
         .merge(agent_api::routes())
+        .merge(pipelines::routes())
         .with_state(state)
 }
 
@@ -97,14 +118,14 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn healthy_when_the_database_answers(pool: PgPool) {
-        let (status, body) = get_json(app(AppState { pool }), "/healthz").await;
+        let (status, body) = get_json(app(crate::testing::bare_state(&pool)), "/healthz").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, serde_json::json!({ "status": "ok" }));
     }
 
     #[sqlx::test(migrations = "./migrations")]
     async fn unhealthy_when_the_database_is_gone(pool: PgPool) {
-        let state = AppState { pool: pool.clone() };
+        let state = crate::testing::bare_state(&pool);
         pool.close().await;
 
         let (status, body) = get_json(app(state), "/healthz").await;

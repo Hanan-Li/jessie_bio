@@ -7,21 +7,30 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use petgraph::algo::toposort;
 use petgraph::stable_graph::{NodeIndex, StableDiGraph};
+use serde::Serialize;
 
 use crate::canvas::Canvas;
 use crate::pipeline_graph::{GraphEdge, GraphNode, PipelineGraph, Wiring};
 use crate::spec::SpecRegistry;
 use crate::types::{SemanticType, can_connect};
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+/// One problem with a canvas.
+///
+/// Serialized for the API's `422` responses, so the frontend can mark each
+/// broken node: `{"code": "unknown_spec", "node": "fastqc_1", ...}`.
+/// `tag = "code"` puts the variant's name in a `code` field beside its
+/// own fields (an "internally tagged" enum), which is why every variant
+/// has named fields: a bare `Cycle(String)` would have nowhere to go.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
 pub enum ValidationError {
-    #[error("more than one node has the id `{0}`")]
-    DuplicateNodeId(String),
+    #[error("more than one node has the id `{node}`")]
+    DuplicateNodeId { node: String },
 
     #[error(
-        "node id `{0}` must start with a letter, contain only letters, digits and underscores, and not contain `__`"
+        "node id `{node}` must start with a letter, contain only letters, digits and underscores, and not contain `__`"
     )]
-    InvalidNodeId(String),
+    InvalidNodeId { node: String },
 
     #[error(
         "node `{node}` sets {names:?}, but node specs can't declare parameters yet, so they would be ignored"
@@ -35,8 +44,8 @@ pub enum ValidationError {
         version: String,
     },
 
-    #[error("an edge refers to node `{0}`, which is not on the canvas")]
-    UnknownNode(String),
+    #[error("an edge refers to node `{node}`, which is not on the canvas")]
+    UnknownNode { node: String },
 
     #[error("node `{node}` has no output called `{port}`")]
     UnknownOutputPort { node: String, port: String },
@@ -55,8 +64,8 @@ pub enum ValidationError {
     #[error("input `{node}.{port}` is connected more than once")]
     InputConnectedTwice { node: String, port: String },
 
-    #[error("node `{0}` is part of a cycle")]
-    Cycle(String),
+    #[error("node `{node}` is part of a cycle")]
+    Cycle { node: String },
 }
 
 pub fn validate(
@@ -72,13 +81,17 @@ pub fn validate(
 
     for node in &canvas.nodes {
         if !seen_ids.insert(node.id.clone()) {
-            errors.push(ValidationError::DuplicateNodeId(node.id.clone()));
+            errors.push(ValidationError::DuplicateNodeId {
+                node: node.id.clone(),
+            });
             continue;
         }
         // Still added to the graph below: the id is only a naming problem,
         // and its edges can be checked as usual.
         if !is_valid_node_id(&node.id) {
-            errors.push(ValidationError::InvalidNodeId(node.id.clone()));
+            errors.push(ValidationError::InvalidNodeId {
+                node: node.id.clone(),
+            });
         }
         // Specs have no parameter schema yet, and codegen doesn't pass
         // parameters on. Accepting them would silently ignore a setting the
@@ -113,7 +126,7 @@ pub fn validate(
 
         for id in [&from.node, &to.node] {
             if !seen_ids.contains(id) {
-                errors.push(ValidationError::UnknownNode(id.clone()));
+                errors.push(ValidationError::UnknownNode { node: id.clone() });
             }
         }
         // If either end is missing (unknown node, or unknown spec already
@@ -168,7 +181,9 @@ pub fn validate(
     }
 
     if let Err(cycle) = toposort(&graph, None) {
-        errors.push(ValidationError::Cycle(graph[cycle.node_id()].id.clone()));
+        errors.push(ValidationError::Cycle {
+            node: graph[cycle.node_id()].id.clone(),
+        });
     }
 
     if errors.is_empty() {
@@ -244,7 +259,9 @@ mod tests {
         let errors = validate(&canvas, &test_registry()).unwrap_err();
         assert_eq!(
             errors,
-            vec![ValidationError::DuplicateNodeId("qc".to_string())]
+            vec![ValidationError::DuplicateNodeId {
+                node: "qc".to_string()
+            }]
         );
     }
 
@@ -263,9 +280,15 @@ mod tests {
         assert_eq!(
             errors,
             vec![
-                ValidationError::InvalidNodeId("qc 1".to_string()),
-                ValidationError::InvalidNodeId("1qc".to_string()),
-                ValidationError::InvalidNodeId("qc__1".to_string()),
+                ValidationError::InvalidNodeId {
+                    node: "qc 1".to_string()
+                },
+                ValidationError::InvalidNodeId {
+                    node: "1qc".to_string()
+                },
+                ValidationError::InvalidNodeId {
+                    node: "qc__1".to_string()
+                },
             ]
         );
     }
@@ -317,7 +340,9 @@ mod tests {
         let errors = validate(&canvas, &test_registry()).unwrap_err();
         assert_eq!(
             errors,
-            vec![ValidationError::UnknownNode("ghost".to_string())]
+            vec![ValidationError::UnknownNode {
+                node: "ghost".to_string()
+            }]
         );
     }
 
@@ -396,7 +421,7 @@ mod tests {
         let errors = validate(&canvas, &registry).unwrap_err();
 
         assert!(
-            matches!(&errors[..], [ValidationError::Cycle(_)]),
+            matches!(&errors[..], [ValidationError::Cycle { .. }]),
             "{errors:?}"
         );
     }
@@ -409,5 +434,25 @@ mod tests {
         }));
         let errors = validate(&canvas, &test_registry()).unwrap_err();
         assert_eq!(errors.len(), 3, "{errors:?}");
+    }
+
+    #[test]
+    fn errors_serialize_with_a_code_and_their_fields() {
+        let error = ValidationError::UnknownSpec {
+            node: "x".to_string(),
+            spec: "nope".to_string(),
+            version: "1.0.0".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(&error).unwrap(),
+            json!({ "code": "unknown_spec", "node": "x", "spec": "nope", "version": "1.0.0" })
+        );
+        let cycle = ValidationError::Cycle {
+            node: "a".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(&cycle).unwrap(),
+            json!({ "code": "cycle", "node": "a" })
+        );
     }
 }

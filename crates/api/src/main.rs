@@ -5,8 +5,11 @@
 //! ```
 //!
 //! On start: connect to Postgres, apply migrations, publish the node
-//! library (refusing to start if a published version changed), start the
-//! reaper, then serve.
+//! library (refusing to start if a published version changed), read it
+//! back as the registry the compiler uses, start the reaper, then serve.
+//!
+//! The UI endpoints need the development token (DESIGN.md §4.3; user
+//! accounts come in P1): `JESSIE_DEV_TOKEN=<any long random string>`.
 //!
 //! Setup commands (DESIGN.md §4.3: agent tokens come from a setup command,
 //! later an admin screen):
@@ -18,10 +21,12 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
 use api::agents::{self, NewComputeEnv};
+use api::users::dev_token_digest;
 use api::{AppState, MIGRATOR, app, node_library, run_reaper};
 use clap::{Parser, Subcommand};
 use compiler::library::load_library;
@@ -44,6 +49,11 @@ struct Args {
     /// The node library directory.
     #[arg(long, env = "JESSIE_NODES", default_value = "nodes")]
     nodes: PathBuf,
+    /// The development token, which opens the UI endpoints. Without it,
+    /// only agents can use the API. Prefer the environment variable: a
+    /// flag shows up in `ps` for every user on the machine.
+    #[arg(long, env = "JESSIE_DEV_TOKEN", hide_env_values = true)]
+    dev_token: Option<String>,
     /// Without a command, run the server.
     #[command(subcommand)]
     command: Option<Command>,
@@ -124,6 +134,18 @@ async fn main() -> anyhow::Result<()> {
         "node library: {} published, {} unchanged",
         report.published, report.unchanged
     );
+    let registry = node_library::load_registry(&pool).await?;
+
+    let dev_token = match args.dev_token.as_deref().map(str::trim) {
+        None | Some("") => {
+            println!("no JESSIE_DEV_TOKEN: the UI endpoints will refuse every request");
+            None
+        }
+        Some(token) if token.len() < 16 => {
+            anyhow::bail!("JESSIE_DEV_TOKEN is too short: use at least 16 random characters")
+        }
+        Some(token) => Some(dev_token_digest(token)),
+    };
 
     // `tokio::spawn` runs the reaper alongside the server, on the same
     // runtime. It gets its own handle to the pool (a cheap clone); when
@@ -134,7 +156,12 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("listening on {}", args.listen))?;
     println!("listening on http://{}", listener.local_addr()?);
-    axum::serve(listener, app(AppState { pool }))
+    let state = AppState {
+        pool,
+        registry: Arc::new(registry),
+        dev_token,
+    };
+    axum::serve(listener, app(state))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     println!("shut down");

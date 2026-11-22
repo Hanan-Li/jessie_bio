@@ -42,6 +42,7 @@ Dates are when the work reached `main`.
 - 2026-11-10: **first real run**: the compiled FastQC → MultiQC project on real reads with Docker.
 - 2026-11-11: the agent: preflight and staging (#9), `agent run` (#10), trace, hashes, output manifests and `result.json` (#11). Full review of P0a/P0b; fixes for stopping (#12) and parameters plus the README (#13). Remaining gaps: DESIGN.md §12.
 - 2026-11-13 to 2026-11-16: the P0c design: agent protocol (#15), queue and control-plane API (#16). P0c PR 1, the `protocol` messages (#17), and PR 2, the `api` skeleton (#18).
+- 2026-11-22: P0c PR 3, the queue, agent endpoints and reaper (#19). PR 4, the UI endpoints, was split into four smaller PRs at David's request (one large PR was too much to review); part 1 is the development token and validate.
 
 ## Honest market assessment (2026-09-27)
 
@@ -58,6 +59,7 @@ These are for awareness, not blockers; the project is learning-first.
 
 - Development happens in a **Linux VM** (Ubuntu), with the repo on the VM's own filesystem (not a Windows shared folder).
 - Installed: Rust via rustup (the repo pins 1.98), Java 17, Nextflow 26.10.5 (in `~/.local/bin`), Docker 29. David's user is in the `docker` group, which real runs need.
+- Cloud sessions (Claude Code on the web) have no Docker daemon, so `scripts/dev-db.sh` can't run there; they use the system Postgres 16 on the same port, 5433, with the same `jessie` role and database.
 - Development Postgres: the `jessie-postgres` container (`postgres:17`, 671 MB image) from `scripts/dev-db.sh`, on **127.0.0.1:5433** with the `jessie-pgdata` volume. Port 5432 is taken by a system-wide Postgres service on the VM, left untouched.
 - Port 8080 is taken by David's `freqtrade` container (FreqUI), which answers 200 to every path; the API defaults to **127.0.0.1:8470**. Lesson from setting this up: a health check must recognise the service's own response, not just accept any 200.
 - Test data: the nextflow-io/rnaseq-nf demo reads `ggal_gut_1.fq` / `ggal_gut_2.fq` (pinned commit `53377cf`), downloaded to `data/ggal/`, which is git-ignored. `out/` (compiled projects and run directories) is git-ignored too.
