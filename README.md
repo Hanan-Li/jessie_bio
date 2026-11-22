@@ -162,13 +162,18 @@ curl -s -X POST localhost:8470/api/validate -H "$H" -H 'Content-Type: applicatio
   -d "{\"canvas\": $CANVAS}"
 
 # Save it as a pipeline version (saving under the same name again makes version 2).
-curl -s -X POST localhost:8470/api/pipelines -H "$H" -H 'Content-Type: application/json' \
-  -d "{\"name\": \"QC\", \"canvas\": $CANVAS}"
+PIPELINE_VERSION=$(curl -s -X POST localhost:8470/api/pipelines -H "$H" -H 'Content-Type: application/json' \
+  -d "{\"name\": \"QC\", \"canvas\": $CANVAS}" | jq -r .pipeline_version_id)
 
 # Register the reads on the agent's disk: the script hashes them with sha256sum
 # and sends only paths, sizes and digests. One <sample>=<R1>,<R2> per sample.
-scripts/register-dataset.sh --name "ggal reads" --agent "$AGENT_ID" \
-  gut=data/ggal/ggal_gut_1.fq,data/ggal/ggal_gut_2.fq      # prints the dataset id
+DATASET=$(scripts/register-dataset.sh --name "ggal reads" --agent "$AGENT_ID" \
+  gut=data/ggal/ggal_gut_1.fq,data/ggal/ggal_gut_2.fq)
+
+# Launch: compiles the pipeline, stores each job's project, queues the jobs.
+curl -s -X POST localhost:8470/api/runs -H "$H" -H 'Content-Type: application/json' \
+  -d "{\"pipeline_version_id\": \"$PIPELINE_VERSION\", \"compute_env\": \"laptop\",
+       \"inputs\": {\"fastqc_1__reads\": \"$DATASET\"}}"      # 201 {"run_id": ...}
 ```
 
 | Endpoint | |
@@ -176,6 +181,9 @@ scripts/register-dataset.sh --name "ggal reads" --agent "$AGENT_ID" \
 | `POST /api/validate` | Check a canvas without storing it; 422 lists every problem, typed by `code` |
 | `POST /api/pipelines` | Validate and store a canvas as the next version of a named pipeline |
 | `POST /api/datasets` | Register samples and their files (paths on one agent's disk, with digests) |
+| `POST /api/runs` | Launch a pipeline version on a compute environment; 422 lists every problem |
 
-Nothing queues jobs yet: launching runs (`POST /api/runs`) is coming in the
-next parts of P0c PR 4.
+After launch, the job waits in the queue for an agent: the agent's
+`/api/agent/lease` call above now returns it.
+
+Watching and cancelling runs come in the last part of P0c PR 4.
