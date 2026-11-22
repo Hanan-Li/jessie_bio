@@ -8,7 +8,8 @@
 //! - P0c PR 4, the UI endpoints, in parts. Part 1: the development token
 //!   (`users`) and validating a canvas (`pipelines`). Part 2: saving
 //!   pipelines (`pipelines`) and registering datasets (`datasets`).
-//!   Part 3: launching runs (`runs`).
+//!   Part 3: launching runs (`runs`). Part 4: run status and cancel
+//!   (`runs`).
 
 pub mod agent_api;
 pub mod agents;

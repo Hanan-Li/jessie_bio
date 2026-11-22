@@ -44,7 +44,7 @@ Dates are when the work reached `main`.
 - 2026-11-10: **first real run**: the compiled FastQC → MultiQC project on real reads with Docker.
 - 2026-11-11: the agent: preflight and staging (#9), `agent run` (#10), trace, hashes, output manifests and `result.json` (#11). Full review of P0a/P0b; fixes for stopping (#12) and parameters plus the README (#13). Remaining gaps: DESIGN.md §12.
 - 2026-11-13 to 2026-11-16: the P0c design: agent protocol (#15), queue and control-plane API (#16). P0c PR 1, the `protocol` messages (#17), and PR 2, the `api` skeleton (#18).
-- 2026-11-22: P0c PR 3, the queue, agent endpoints and reaper (#19). PR 4, the UI endpoints, was split into four smaller PRs at David's request (one large PR was too much to review); part 1, the development token and validate, merged as #20; part 2, saving pipelines and registering datasets, as #21; part 3 is launch.
+- 2026-11-22 to 2026-11-24: P0c PR 3, the queue, agent endpoints and reaper (#19). PR 4, the UI endpoints, was split into four smaller PRs at David's request (one large PR was too much to review): part 1, the development token and validate (#20); part 2, saving pipelines and registering datasets (#21); part 3, launch (#22); part 4, run status and cancel.
 
 ## Honest market assessment (2026-09-27)
 

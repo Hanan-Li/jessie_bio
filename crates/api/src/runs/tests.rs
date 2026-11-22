@@ -28,6 +28,19 @@ async fn launch_run(state: &AppState, body: Value) -> Reply {
     call(state, "POST", "/api/runs", Some(DEV_TOKEN), Some(body)).await
 }
 
+async fn get_run(state: &AppState, run_id: &str) -> Value {
+    let reply = call(
+        state,
+        "GET",
+        &format!("/api/runs/{run_id}"),
+        Some(DEV_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    reply.json()
+}
+
 /// A pipeline, a dataset on the `laptop` agent, and a launch request for
 /// them: everything a run needs.
 struct Ready {
@@ -311,6 +324,164 @@ async fn two_unconnected_nodes_are_two_jobs(pool: PgPool) {
     let run: Uuid = reply.json()["run_id"].as_str().unwrap().parse().unwrap();
     assert_eq!(job_state(&pool, run, 0).await, "queued");
     assert_eq!(job_state(&pool, run, 1).await, "queued");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_run_shows_its_jobs_tasks_and_outputs(pool: PgPool) {
+    let Ready {
+        state,
+        agent,
+        launch,
+    } = ready(&pool).await;
+    let run_id = launch_run(&state, launch.clone()).await.json()["run_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let run = get_run(&state, &run_id).await;
+    assert_eq!(run["state"], "running");
+    assert_eq!(run["compute_env"], ENV);
+    assert_eq!(run["pipeline_version_id"], launch["pipeline_version_id"]);
+    assert_eq!(run["inputs"], launch["inputs"]);
+    assert_eq!(run["finished_at"], Value::Null);
+    assert_eq!(run["jobs"].as_array().unwrap().len(), 1);
+    assert_eq!(run["jobs"][0]["state"], "queued");
+
+    let lease = queue::acquire(&pool, &agent.agent, "0.1.0")
+        .await
+        .unwrap()
+        .unwrap();
+    let mut result = fastqc_succeeded("fastqc_1__zip");
+    result.tasks = vec![protocol::result::TaskRecord {
+        task_id: 1,
+        hash: "4e/01d43c".to_string(),
+        name: "FASTQC_fastqc_1 (gut)".to_string(),
+        process: "FASTQC_fastqc_1".to_string(),
+        tag: Some("gut".to_string()),
+        status: protocol::result::TaskStatus::Completed,
+        exit_code: Some(0),
+        duration_ms: Some(1200),
+        realtime_ms: Some(900),
+    }];
+    let job_id = lease.lease.job_id.parse().unwrap();
+    let done = queue::complete(&pool, &agent.agent, job_id, lease.lease.attempt, &result)
+        .await
+        .unwrap();
+    assert!(matches!(done, Completion::Recorded(_)));
+
+    let run = get_run(&state, &run_id).await;
+    assert_eq!(run["state"], "succeeded");
+    assert!(run["finished_at"].as_str().unwrap().ends_with('Z'));
+    let job = &run["jobs"][0];
+    assert_eq!(job["state"], "succeeded");
+    assert_eq!(job["attempt"], 1);
+    assert_eq!(job["agent_id"], json!(agent.agent.id));
+    assert_eq!(
+        job["tasks"],
+        json!([{ "name": "FASTQC_fastqc_1 (gut)", "status": "completed",
+                 "exit_code": 0, "duration_ms": 1200 }])
+    );
+    assert_eq!(job["outputs"][0]["name"], "fastqc_1__zip");
+    assert_eq!(job["outputs"][0]["sample"], "gut");
+    assert_eq!(job["outputs"][0]["digest"], digest_of("fastqc_1__zip"));
+
+    // A finished run can't be cancelled.
+    let reply = call(
+        &state,
+        "POST",
+        &format!("/api/runs/{run_id}/cancel"),
+        Some(DEV_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT);
+    assert_eq!(reply.json()["error"]["code"], "run_finished");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn cancelling_a_queued_run_cancels_its_jobs(pool: PgPool) {
+    let Ready { state, launch, .. } = ready(&pool).await;
+    let run_id = launch_run(&state, launch).await.json()["run_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let reply = call(
+        &state,
+        "POST",
+        &format!("/api/runs/{run_id}/cancel"),
+        Some(DEV_TOKEN),
+        None,
+    )
+    .await;
+
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.json()["state"], "cancelled");
+    let run = get_run(&state, &run_id).await;
+    assert_eq!(run["state"], "cancelled");
+    assert_eq!(run["jobs"][0]["state"], "cancelled");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_running_job_is_asked_to_stop(pool: PgPool) {
+    let Ready {
+        state,
+        agent,
+        launch,
+    } = ready(&pool).await;
+    let run_id = launch_run(&state, launch).await.json()["run_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let lease = queue::acquire(&pool, &agent.agent, "0.1.0")
+        .await
+        .unwrap()
+        .unwrap();
+
+    let uri = format!("/api/runs/{run_id}/cancel");
+    let reply = call(&state, "POST", &uri, Some(DEV_TOKEN), None).await;
+    assert_eq!(reply.status, StatusCode::OK);
+
+    let job = &get_run(&state, &run_id).await["jobs"][0];
+    assert_eq!(
+        job["state"], "leased",
+        "still running until the agent stops it"
+    );
+    assert_eq!(job["cancel_requested"], true);
+    let action = queue::heartbeat(
+        &pool,
+        &agent.agent,
+        lease.lease.job_id.parse().unwrap(),
+        lease.lease.attempt,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(action, Some(protocol::lease::HeartbeatAction::Cancel));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn unknown_runs_are_404(pool: PgPool) {
+    let state = ui_state(&pool).await;
+    let nobody = Uuid::new_v4();
+    let reply = call(
+        &state,
+        "GET",
+        &format!("/api/runs/{nobody}"),
+        Some(DEV_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    let reply = call(
+        &state,
+        "POST",
+        &format!("/api/runs/{nobody}/cancel"),
+        Some(DEV_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
 }
 
 #[test]
