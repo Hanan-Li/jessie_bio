@@ -144,6 +144,19 @@ mod tests {
         assert_eq!(authenticate(&pool, "").await.unwrap(), None);
     }
 
+    /// An algorithm the code doesn't know would only fail later, when a
+    /// lease for this environment is built; the database refuses it now.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn an_unknown_hash_algorithm_is_refused(pool: PgPool) {
+        let inserted = sqlx::query(
+            "INSERT INTO compute_envs (id, nextflow_version, hash_algorithm)
+             VALUES ('old', '26.10.5', 'md5')",
+        )
+        .execute(&pool)
+        .await;
+        assert!(inserted.is_err());
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     async fn only_the_digest_is_stored(pool: PgPool) {
         env(&pool).await;

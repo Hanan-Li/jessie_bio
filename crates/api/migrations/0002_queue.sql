@@ -5,7 +5,9 @@
 CREATE TABLE compute_envs (
     id               TEXT PRIMARY KEY,
     nextflow_version TEXT NOT NULL,
-    hash_algorithm   TEXT NOT NULL DEFAULT 'sha256',
+    -- The algorithms `protocol::digest::HashAlgorithm` knows; add one here
+    -- when adding it there.
+    hash_algorithm   TEXT NOT NULL DEFAULT 'sha256' CHECK (hash_algorithm IN ('sha256')),
     time_limit_secs  BIGINT CHECK (time_limit_secs > 0),
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -103,9 +105,12 @@ CREATE TABLE job_outputs (
     uri      TEXT NOT NULL,
     digest   TEXT NOT NULL,
     size     BIGINT NOT NULL CHECK (size >= 0),
-    agent_id UUID NOT NULL REFERENCES agents (id)
+    agent_id UUID NOT NULL REFERENCES agents (id),
+    -- One row per file of each output: a result recorded twice can't
+    -- duplicate a job's outputs. The key's index also serves "this job's
+    -- files for this output, in order".
+    PRIMARY KEY (job_id, name, position)
 );
-CREATE INDEX job_outputs_job ON job_outputs (job_id, name, position);
 
 -- Which blobs each project tree lists, so the blob endpoint can serve an
 -- agent only the files of jobs in its own compute environment.

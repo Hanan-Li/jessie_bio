@@ -507,7 +507,7 @@ agents           (id, name, compute_env, token_digest, agent_version, last_seen_
 tree_entries     (tree_digest, path, blob_digest)                       -- which blobs a project uses
 ```
 
-Check constraints make some bad states impossible to write: a `leased` job always has an agent and an expiry, and no other job has an expiry. Partial indexes cover the two queries that run constantly: queued jobs per environment, and leased jobs by expiry.
+Constraints make some bad states impossible to write: a `leased` job always has an agent and an expiry, and no other job has an expiry; an output file can be recorded only once (`job_outputs`' primary key is `(job_id, name, position)`); a compute environment can only name a hash algorithm the code knows. Partial indexes cover the two queries that run constantly: queued jobs per environment, and leased jobs by expiry.
 
 **Why Postgres, and when to revisit.** The queue stays small because a job is a whole segment, minutes to hours long; per-sample tasks are scheduled by Nextflow inside it. Even at 10,000 runs a day × 5 jobs, that is about 0.6 jobs per second; the heaviest load is heartbeats, about 500 single-row updates per second with 10,000 jobs running at once. A well-provisioned Postgres commonly sustains thousands to tens of thousands of such updates per second. Airflow runs several schedulers on this same `SKIP LOCKED` pattern, and Temporal can run on Postgres: workflow state is a database problem first.
 

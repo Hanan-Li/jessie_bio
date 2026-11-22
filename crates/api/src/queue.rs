@@ -1249,6 +1249,35 @@ mod tests {
         );
     }
 
+    /// The database itself refuses duplicate outputs, not only
+    /// `complete`'s attempt check.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn an_output_file_is_recorded_once(pool: PgPool) {
+        let agent = setup(&pool).await;
+        launch_fastqc_multiqc(&pool).await;
+        let job = id_of(&lease(&pool, &agent).await);
+        complete(
+            &pool,
+            &agent.agent,
+            job,
+            1,
+            &fastqc_succeeded("fastqc_1__zip"),
+        )
+        .await
+        .unwrap();
+
+        let duplicate = sqlx::query(
+            "INSERT INTO job_outputs (job_id, name, position, sample, uri, digest, size, agent_id)
+             SELECT job_id, name, position, sample, uri, digest, size, agent_id FROM job_outputs",
+        )
+        .execute(&pool)
+        .await;
+        assert!(
+            duplicate.is_err(),
+            "a second copy of an output row was accepted"
+        );
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     async fn the_reaper_takes_back_expired_leases(pool: PgPool) {
         let agent = setup(&pool).await;
