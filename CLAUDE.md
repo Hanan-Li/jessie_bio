@@ -30,7 +30,7 @@ A no-code, scientist-focused bioinformatics platform: a visual pipeline builder 
 P0 is built inside-out:
 1. **P0a — compiler core** (done): canvas JSON → `PipelineGraph` (the IR) → segments → DSL2 text, with golden-file tests; `compiler` CLI.
 2. **P0b — agent in local mode** (done for batch jobs): `agent run` stages, runs and supervises Nextflow (clean stop on Ctrl-C, SIGTERM or a time limit), parses the trace, hashes outputs, writes output manifests and `result.json`.
-3. **P0c — control plane** (in progress; designed in `docs/DESIGN.md`: agent protocol §4.1, control-plane API §4.3, queue §6; building in the order listed in §4.3; PRs 1 (`protocol` messages), 2 (`api` skeleton) and 3 (queue, agent endpoints, reaper) done): axum + sqlx + queue; the agent leases jobs over HTTPS; GitHub Actions end-to-end test with Postgres and a real Nextflow run.
+3. **P0c — control plane** (in progress; designed in `docs/DESIGN.md`: agent protocol §4.1, control-plane API §4.3, queue §6; building in the order listed in §4.3; PRs 1 (`protocol` messages), 2 (`api` skeleton), 3 (queue, agent endpoints, reaper) and 4 (UI endpoints, launch) done): axum + sqlx + queue; the agent leases jobs over HTTPS; GitHub Actions end-to-end test with Postgres and a real Nextflow run.
 
 ## Conventions
 

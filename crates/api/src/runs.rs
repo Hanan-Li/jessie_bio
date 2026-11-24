@@ -1,10 +1,10 @@
-//! Launching runs (DESIGN.md §4.3, §6):
+//! Launching, watching and cancelling runs (DESIGN.md §4.3, §6):
 //!
 //! ```text
 //! POST /api/runs             { pipeline_version_id, compute_env, inputs }  → 201 { run_id }
+//! GET  /api/runs/{id}        → the run, its jobs, their tasks and outputs
+//! POST /api/runs/{id}/cancel → 200, or 409 if the run already finished
 //! ```
-//!
-//! Watching and cancelling runs come in the next part of P0c PR 4.
 //!
 //! Launching is where everything meets: the compiler (validate, plan,
 //! generate each job's Nextflow project), blob storage (each project as a
@@ -15,10 +15,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use axum::extract::State;
-use axum::extract::rejection::JsonRejection;
+use axum::extract::rejection::{JsonRejection, PathRejection};
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use compiler::canvas::Canvas;
 use compiler::execution_plan::{ExecutionPlan, JobId, JobKind as PlanJobKind};
@@ -26,6 +26,7 @@ use protocol::blob::BlobRef;
 use protocol::digest::{Digest, HashAlgorithm};
 use protocol::job::{InputSource, JobInput};
 use protocol::lease::{InputFile, ResolvedInput};
+use protocol::result::{JobResult, TaskStatus};
 use protocol::types::{Cardinality, SemanticType};
 use serde::{Deserialize, Serialize};
 use sqlx::types::Json as JsonColumn;
@@ -39,7 +40,10 @@ use crate::queue::{self, JobKind, NewJob, NewRun};
 use crate::users::User;
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/api/runs", post(launch))
+    Router::new()
+        .route("/api/runs", post(launch))
+        .route("/api/runs/{id}", get(status))
+        .route("/api/runs/{id}/cancel", post(cancel))
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +396,245 @@ fn resolve(cardinality: Cardinality, files: Vec<(String, InputFile)>) -> Resolve
         })
         .collect();
     ResolvedInput { cardinality, files }
+}
+
+// ---------------------------------------------------------------------------
+// Status
+
+#[derive(Debug, Serialize)]
+struct RunView {
+    run_id: Uuid,
+    /// `running`, `succeeded`, `failed` or `cancelled` (DESIGN.md §6).
+    state: String,
+    created_at: String,
+    finished_at: Option<String>,
+    pipeline_version_id: Option<Uuid>,
+    compute_env: Option<String>,
+    /// Run input → the dataset that fed it.
+    inputs: BTreeMap<String, Uuid>,
+    jobs: Vec<JobView>,
+}
+
+#[derive(Debug, Serialize)]
+struct JobView {
+    index: i32,
+    state: String,
+    attempt: i32,
+    /// The agent holding or last holding the job.
+    agent_id: Option<Uuid>,
+    /// A cancel is on its way to the agent (the job is stopping).
+    cancel_requested: bool,
+    progress: Option<String>,
+    failure_reason: Option<String>,
+    tasks: Vec<TaskView>,
+    warnings: Vec<String>,
+    outputs: Vec<OutputView>,
+}
+
+/// A task as the run monitor shows it: the essentials of a `TaskRecord`.
+#[derive(Debug, Serialize)]
+struct TaskView {
+    name: String,
+    status: TaskStatus,
+    exit_code: Option<i32>,
+    duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct OutputView {
+    name: String,
+    sample: Option<String>,
+    uri: String,
+    digest: String,
+    size: i64,
+    /// The agent whose disk holds the file.
+    agent_id: Uuid,
+}
+
+/// The database formats timestamps, so every one in the API looks the same
+/// (RFC 3339, UTC, milliseconds), without a date-time library here.
+macro_rules! rfc3339 {
+    ($column:literal) => {
+        concat!(
+            "to_char(",
+            $column,
+            " AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')"
+        )
+    };
+}
+
+async fn status(
+    State(state): State<AppState>,
+    _user: User,
+    id: Result<Path<Uuid>, PathRejection>,
+) -> Result<Json<RunView>, ApiError> {
+    let Path(run_id) = id?;
+    let pool = &state.pool;
+
+    // `concat!` builds the query at compile time, so it is still a
+    // `&'static str`, as sqlx requires.
+    let run: Option<(String, String, Option<String>, Option<Uuid>)> = sqlx::query_as(concat!(
+        "SELECT state, ",
+        rfc3339!("created_at"),
+        ", ",
+        rfc3339!("finished_at"),
+        ", pipeline_version_id FROM runs WHERE id = $1"
+    ))
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await?;
+    let (run_state, created_at, finished_at, pipeline_version_id) =
+        run.ok_or_else(|| ApiError::not_found("run"))?;
+
+    let inputs: Vec<(String, Uuid)> =
+        sqlx::query_as("SELECT name, dataset_id FROM run_inputs WHERE run_id = $1")
+            .bind(run_id)
+            .fetch_all(pool)
+            .await?;
+
+    type JobRow = (
+        Uuid,
+        i32,
+        String,
+        i32,
+        Option<Uuid>,
+        bool,
+        Option<String>,
+        Option<String>,
+        Option<JsonColumn<JobResult>>,
+        String,
+    );
+    let rows: Vec<JobRow> = sqlx::query_as(
+        "SELECT id, job_index, state, attempt, agent_id, cancel_requested, progress,
+                failure_reason, result, compute_env
+         FROM jobs WHERE run_id = $1 ORDER BY job_index",
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await?;
+
+    type OutputRow = (Uuid, String, Option<String>, String, String, i64, Uuid);
+    let output_rows: Vec<OutputRow> = sqlx::query_as(
+        "SELECT o.job_id, o.name, o.sample, o.uri, o.digest, o.size, o.agent_id
+         FROM job_outputs o JOIN jobs j ON j.id = o.job_id
+         WHERE j.run_id = $1 ORDER BY j.job_index, o.name, o.position",
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await?;
+    let mut outputs: BTreeMap<Uuid, Vec<OutputView>> = BTreeMap::new();
+    for (job_id, name, sample, uri, digest, size, agent_id) in output_rows {
+        outputs.entry(job_id).or_default().push(OutputView {
+            name,
+            sample,
+            uri,
+            digest,
+            size,
+            agent_id,
+        });
+    }
+
+    let compute_env = rows.first().map(|row| row.9.clone());
+    let jobs = rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                index,
+                state,
+                attempt,
+                agent_id,
+                cancel_requested,
+                progress,
+                failure,
+                result,
+                _,
+            )| {
+                // A result is stored once the job has reported one; a retry
+                // keeps the last attempt's, so its tasks stay visible.
+                let (tasks, warnings) = match result {
+                    Some(JsonColumn(result)) => (
+                        result
+                            .tasks
+                            .into_iter()
+                            .map(|task| TaskView {
+                                name: task.name,
+                                status: task.status,
+                                exit_code: task.exit_code,
+                                duration_ms: task.duration_ms,
+                            })
+                            .collect(),
+                        result.warnings,
+                    ),
+                    None => (Vec::new(), Vec::new()),
+                };
+                JobView {
+                    index,
+                    state,
+                    attempt,
+                    agent_id,
+                    cancel_requested,
+                    progress,
+                    failure_reason: failure,
+                    tasks,
+                    warnings,
+                    // `remove` takes the job's outputs out of the map, so
+                    // they move into the view instead of being copied.
+                    outputs: outputs.remove(&id).unwrap_or_default(),
+                }
+            },
+        )
+        .collect();
+
+    Ok(Json(RunView {
+        run_id,
+        state: run_state,
+        created_at,
+        finished_at,
+        pipeline_version_id,
+        compute_env,
+        inputs: inputs.into_iter().collect(),
+        jobs,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Cancel
+
+#[derive(Serialize)]
+struct Cancelled {
+    run_id: Uuid,
+    state: &'static str,
+}
+
+/// Jobs that haven't started are cancelled at once; running ones are told
+/// through their next heartbeat (DESIGN.md §6), so the run is `cancelled`
+/// straight away while its jobs may take a little longer to stop.
+async fn cancel(
+    State(state): State<AppState>,
+    _user: User,
+    id: Result<Path<Uuid>, PathRejection>,
+) -> Result<Json<Cancelled>, ApiError> {
+    let Path(run_id) = id?;
+    if queue::cancel_run(&state.pool, run_id).await? {
+        return Ok(Json(Cancelled {
+            run_id,
+            state: "cancelled",
+        }));
+    }
+    // Not cancelled: either there's no such run, or it already finished.
+    let run_state: Option<String> = sqlx::query_scalar("SELECT state FROM runs WHERE id = $1")
+        .bind(run_id)
+        .fetch_optional(&state.pool)
+        .await?;
+    match run_state {
+        None => Err(ApiError::not_found("run")),
+        Some(run_state) => Err(ApiError::client(
+            StatusCode::CONFLICT,
+            "run_finished",
+            format!("the run has already finished ({run_state}), so there is nothing to cancel"),
+        )),
+    }
 }
 
 #[cfg(test)]

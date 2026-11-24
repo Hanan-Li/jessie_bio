@@ -149,9 +149,12 @@ curl -X POST localhost:8470/api/agent/lease \
 | `POST /api/agent/jobs/{id}/result` | Report the job's `result.json`; 409 if this attempt is no longer current |
 | `GET /api/agent/blobs/{digest}` | A project file, only for jobs in the agent's own environment |
 
+### Launch a run
+
 The UI endpoints (DESIGN.md §4.3) take the development token instead: in
 P0c there are no user accounts, just the one token the server was started
-with. With `$AGENT_ID` from `create-agent` above:
+with. Until the frontend exists, `curl` and scripts call them. With
+`$AGENT_ID` from `create-agent` above:
 
 ```bash
 H="Authorization: Bearer $JESSIE_DEV_TOKEN"
@@ -171,9 +174,12 @@ DATASET=$(scripts/register-dataset.sh --name "ggal reads" --agent "$AGENT_ID" \
   gut=data/ggal/ggal_gut_1.fq,data/ggal/ggal_gut_2.fq)
 
 # Launch: compiles the pipeline, stores each job's project, queues the jobs.
-curl -s -X POST localhost:8470/api/runs -H "$H" -H 'Content-Type: application/json' \
+RUN=$(curl -s -X POST localhost:8470/api/runs -H "$H" -H 'Content-Type: application/json' \
   -d "{\"pipeline_version_id\": \"$PIPELINE_VERSION\", \"compute_env\": \"laptop\",
-       \"inputs\": {\"fastqc_1__reads\": \"$DATASET\"}}"      # 201 {"run_id": ...}
+       \"inputs\": {\"fastqc_1__reads\": \"$DATASET\"}}" | jq -r .run_id)
+
+curl -s localhost:8470/api/runs/$RUN -H "$H" | jq .         # state, jobs, tasks, outputs
+curl -s -X POST localhost:8470/api/runs/$RUN/cancel -H "$H"  # cancel it
 ```
 
 | Endpoint | |
@@ -182,8 +188,9 @@ curl -s -X POST localhost:8470/api/runs -H "$H" -H 'Content-Type: application/js
 | `POST /api/pipelines` | Validate and store a canvas as the next version of a named pipeline |
 | `POST /api/datasets` | Register samples and their files (paths on one agent's disk, with digests) |
 | `POST /api/runs` | Launch a pipeline version on a compute environment; 422 lists every problem |
+| `GET /api/runs/{id}` | The run: state, jobs, their tasks and output files |
+| `POST /api/runs/{id}/cancel` | Cancel; running jobs stop at their next heartbeat. 409 if already finished |
 
 After launch, the job waits in the queue for an agent: the agent's
-`/api/agent/lease` call above now returns it.
-
-Watching and cancelling runs come in the last part of P0c PR 4.
+`/api/agent/lease` call above now returns it. The agent's own polling loop,
+`agent serve`, is the next PR.
