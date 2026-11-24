@@ -8,6 +8,7 @@
 
 use anyhow::{Context, bail};
 use compiler::library::LibraryNode;
+use compiler::spec::{NodeSpec, SpecRegistry};
 use protocol::blob::Blob;
 use protocol::digest::{HashAlgorithm, digest_bytes};
 use sqlx::PgPool;
@@ -93,6 +94,36 @@ pub async fn sync(
     Ok(report)
 }
 
+/// Every published node, read back from the database: what validation,
+/// planning and code generation use. The database, not `nodes/`, is the
+/// source of truth, so a run always compiles against exactly what was
+/// published, even after a node is removed from `nodes/`.
+pub async fn load_registry(pool: &PgPool) -> anyhow::Result<SpecRegistry> {
+    let rows: Vec<(Json<NodeSpec>, Option<Vec<u8>>)> = sqlx::query_as(
+        "SELECT n.spec, b.bytes FROM node_specs n
+         LEFT JOIN blobs b ON b.digest = n.module_digest
+         ORDER BY n.id, n.version",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut modules = Vec::new();
+    let mut specs = Vec::new();
+    for (Json(spec), module) in rows {
+        if let Some(bytes) = module {
+            let source = String::from_utf8(bytes)
+                .with_context(|| format!("module of {} {} is not UTF-8", spec.id, spec.version))?;
+            modules.push((spec.id.clone(), spec.version.clone(), source));
+        }
+        specs.push(spec);
+    }
+    let mut registry = SpecRegistry::new(specs);
+    for (id, version, source) in &modules {
+        registry.add_module_source(id, version, source);
+    }
+    Ok(registry)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -171,6 +202,24 @@ mod tests {
             count(&pool, "SELECT count(*) FROM blobs").await,
             2,
             "the edited module's blob was rolled back"
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn the_registry_is_read_back_from_the_database(pool: PgPool) {
+        sync(&pool, repo_library(), SHA).await.unwrap();
+
+        let registry = load_registry(&pool).await.unwrap();
+
+        assert!(registry.get("fastqc", "0.1.0").is_some());
+        assert!(registry.get("multiqc", "0.1.0").is_some());
+        let on_disk = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../nodes/fastqc/0.1.0/main.nf"),
+        )
+        .unwrap();
+        assert_eq!(
+            registry.module_source("fastqc", "0.1.0"),
+            Some(on_disk.as_str())
         );
     }
 

@@ -8,6 +8,7 @@
 //! response through the `IntoResponse` trait.
 
 use axum::Json;
+use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
@@ -54,6 +55,31 @@ impl ApiError {
         )
     }
 
+    /// The UI endpoints' version: a user token, not an agent's.
+    pub fn unauthorized_user() -> ApiError {
+        ApiError::client(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "a valid user token is required (Authorization: Bearer <token>)",
+        )
+    }
+
+    /// A request that is well-formed JSON but asks for something invalid,
+    /// with every problem found in `details`, so the caller can fix them
+    /// all at once.
+    pub fn unprocessable(
+        code: &'static str,
+        message: impl Into<String>,
+        details: serde_json::Value,
+    ) -> ApiError {
+        ApiError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code,
+            message: message.into(),
+            details: Some(details),
+        }
+    }
+
     /// Also used for things that exist but belong to someone else, so a
     /// caller can't learn what exists by probing.
     pub fn not_found(what: &str) -> ApiError {
@@ -83,6 +109,27 @@ impl ApiError {
 impl From<sqlx::Error> for ApiError {
     fn from(error: sqlx::Error) -> ApiError {
         ApiError::internal(error)
+    }
+}
+
+/// axum's own extractors answer bad input with plain text. A handler takes
+/// the extractor's `Result` instead of the value (`body: Result<Json<T>,
+/// JsonRejection>`), and `body?` turns the rejection into our one error
+/// shape through this `From`. A message from a newer format version lands
+/// here too, with the "upgrade the agent" text from `FormatVersion`.
+impl From<JsonRejection> for ApiError {
+    fn from(rejection: JsonRejection) -> ApiError {
+        ApiError::client(rejection.status(), "invalid_request", rejection.body_text())
+    }
+}
+
+impl From<PathRejection> for ApiError {
+    fn from(rejection: PathRejection) -> ApiError {
+        ApiError::client(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            rejection.body_text(),
+        )
     }
 }
 

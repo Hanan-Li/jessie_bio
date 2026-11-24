@@ -325,6 +325,8 @@ The UI will also need read endpoints the walking skeleton doesn't: the node pale
 
 **Errors** use one JSON shape everywhere: `{ "error": { "code", "message", "details" } }`. Validation failures are `422` with every `ValidationError` in `details`, typed so the frontend can mark each broken node (`ValidationError` gains `Serialize`).
 
+As built (PR 4), each entry of `details` is the error's own fields with its kind in `code` and a readable `message` beside them: `{ "code": "unknown_spec", "node": "fastqc_1", "spec": "fastqc", "version": "9.9.9", "message": "…" }`. Serde calls this an *internally tagged* enum; it needs every variant to have named fields, so `Cycle(String)` and the other one-value variants became `Cycle { node }`. A body that doesn't parse (a misspelled canvas field) is `invalid_request` before validation starts.
+
 **Launching a run** (`POST /api/runs`):
 
 1. Load the pipeline version's canvas (immutable) and the specs it uses.
@@ -360,6 +362,11 @@ Compilation happens synchronously inside the request: the compiler takes millise
 
 - **Managed tier: uploads.** A lab without a server uploads from the browser straight to the workspace's S3 bucket through short-lived upload URLs, so the bytes still bypass the API; an agent hashes each file on first use.
 
+**As built (PR 4).** Decisions made while building the UI endpoints:
+
+- *The development token* comes from `JESSIE_DEV_TOKEN` (or `--dev-token`) at startup, at least 16 characters. The API keeps only its SHA-256 and compares digests, so the time a comparison takes says nothing about how much of a guessed token was right. Without one, the UI endpoints refuse everyone and the server serves only agents. Agent tokens don't open UI endpoints and the development token doesn't open agent endpoints: each has its own extractor (`users::User`, `agents::Agent`), and a handler names the one it needs.
+- *The compiler's registry is read back from the database* at startup (`node_library::load_registry`), right after the node library is published, rather than built from `nodes/` directly: a run always compiles against exactly what was published.
+
 **Kept out of P0c on purpose:** user accounts, projects and roles (P1; tables carry `project_id` from the start so adding them later reshapes nothing), the UI read endpoints and OpenAPI client (frontend API design), the inventory flow and samplesheet builder (P1).
 
 **End-to-end test in CI:** GitHub Actions starts Postgres as a service, the `api`, and an agent serving in a loop; the test launches the test canvas through the API, waits for `succeeded`, and checks the output digests. It uses **stub runs**: pulling the 1–3 GB images on every CI run would be slow. Real Docker runs remain a local check before merging.
@@ -369,7 +376,7 @@ Compilation happens synchronously inside the request: the compiler takes millise
 1. **Built.** `protocol`: lease, heartbeat and result messages (`lease.rs`); blob and tree types (`blob.rs`) with the hasher moved into `protocol` so the API and agent share it; the versioning rules (`version.rs`), with `format_version` on `job.json` and `result.json`.
 2. **Built.** The `api` crate skeleton: axum, sqlx, migrations (embedded in the binary), configuration from flags or environment variables, `GET /healthz` (which also checks the database), graceful shutdown on Ctrl-C or SIGTERM, and loading the node library into Postgres with immutability enforced. Queries are runtime-checked (`sqlx::query`) for now: sqlx's compile-time checking (`query!`) needs a database or saved query metadata at build time, which can be added once there are enough queries to justify it. sqlx 0.9 accepts only `&'static str` SQL unless explicitly marked reviewed, so queries can't be assembled from runtime strings.
 3. **Built.** The queue module (`queue.rs`: `enqueue_run`, `acquire`, `heartbeat`, `complete`, `reap`, `cancel_run`), the four agent endpoints (`agent_api.rs`), agent tokens (`agents.rs`), and the reaper, a tokio task every 10 s. Tested against real Postgres (`#[sqlx::test]`), including 30 agents racing for 20 jobs and two results arriving at once. Agent tokens: `api create-compute-env` and `api create-agent` (which prints the token once); the database stores only the token's SHA-256, and tokens start with `jat_` so a leaked one is easy to spot. Launch isn't built yet, so `enqueue_run` is called only by tests until PR 4.
-4. The UI endpoints: validate, pipelines, datasets, launch, run status, cancel.
+4. The UI endpoints: validate, pipelines, datasets, launch, run status, cancel. Built in four smaller PRs: (1) the development token and validate, **built**; (2) saving pipelines and registering datasets; (3) launch; (4) run status and cancel.
 5. `agent serve`: the polling loop, blob fetching and cache, the heartbeat task, posting results.
 6. The end-to-end test in CI.
 

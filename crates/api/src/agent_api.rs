@@ -39,22 +39,6 @@ pub fn routes() -> Router<AppState> {
         .route("/api/agent/blobs/{digest}", get(blob))
 }
 
-/// axum's own extractors answer bad input with plain text. Taking the
-/// extractor's `Result` instead of the value lets us turn its rejection
-/// into our one error shape. A message from a newer format version lands
-/// here too, with the "upgrade the agent" text from `FormatVersion`.
-fn bad_body(rejection: JsonRejection) -> ApiError {
-    ApiError::client(rejection.status(), "invalid_request", rejection.body_text())
-}
-
-fn bad_path(rejection: PathRejection) -> ApiError {
-    ApiError::client(
-        StatusCode::BAD_REQUEST,
-        "invalid_request",
-        rejection.body_text(),
-    )
-}
-
 fn lease_lost() -> ApiError {
     ApiError::client(
         StatusCode::CONFLICT,
@@ -70,7 +54,7 @@ async fn lease(
     agent: Agent,
     body: Result<Json<LeaseRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    let Json(request) = body.map_err(bad_body)?;
+    let Json(request) = body?;
     match queue::acquire(&state.pool, &agent, &request.agent_version).await? {
         Some(lease) => Ok(Json(lease).into_response()),
         // Nothing to do: the agent waits and polls again.
@@ -84,8 +68,8 @@ async fn heartbeat(
     id: Result<Path<Uuid>, PathRejection>,
     body: Result<Json<HeartbeatRequest>, JsonRejection>,
 ) -> Result<Json<HeartbeatReply>, ApiError> {
-    let Path(job_id) = id.map_err(bad_path)?;
-    let Json(request) = body.map_err(bad_body)?;
+    let Path(job_id) = id?;
+    let Json(request) = body?;
     let action = queue::heartbeat(
         &state.pool,
         &agent,
@@ -113,8 +97,8 @@ async fn result(
     id: Result<Path<Uuid>, PathRejection>,
     body: Result<Json<ResultReport>, JsonRejection>,
 ) -> Result<Json<ResultAccepted>, ApiError> {
-    let Path(job_id) = id.map_err(bad_path)?;
-    let Json(report) = body.map_err(bad_body)?;
+    let Path(job_id) = id?;
+    let Json(report) = body?;
     match queue::complete(&state.pool, &agent, job_id, report.attempt, &report.result).await? {
         Completion::Recorded(job_state) | Completion::AlreadyRecorded(job_state) => {
             Ok(Json(ResultAccepted {
@@ -133,7 +117,7 @@ async fn blob(
     agent: Agent,
     digest: Result<Path<String>, PathRejection>,
 ) -> Result<Response, ApiError> {
-    let Path(digest) = digest.map_err(bad_path)?;
+    let Path(digest) = digest?;
     // Parse before querying: a malformed digest can't name any blob.
     let digest: Digest = digest.parse().map_err(|_| ApiError::not_found("blob"))?;
     let digest = digest.to_string();
@@ -156,32 +140,17 @@ async fn blob(
 
 #[cfg(test)]
 mod tests {
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode, header};
-    use http_body_util::BodyExt;
+    use axum::http::{StatusCode, header};
     use protocol::blob::{BlobRef, Tree};
     use protocol::lease::LeaseResponse;
     use protocol::result::JobStatus;
     use serde_json::{Value, json};
     use sqlx::PgPool;
-    use tower::ServiceExt;
 
-    use crate::testing::*;
-    use crate::{AppState, app};
+    use crate::AppState;
+    use crate::testing::{self, *};
 
-    struct Reply {
-        status: StatusCode,
-        headers: axum::http::HeaderMap,
-        bytes: Vec<u8>,
-    }
-
-    impl Reply {
-        fn json(&self) -> Value {
-            serde_json::from_slice(&self.bytes).unwrap()
-        }
-    }
-
-    /// One request straight into the router, as an agent with `token`.
+    /// Agent-endpoint calls need no node library or development token.
     async fn call(
         pool: &PgPool,
         method: &str,
@@ -189,33 +158,8 @@ mod tests {
         token: Option<&str>,
         body: Option<Value>,
     ) -> Reply {
-        let mut request = Request::builder().method(method).uri(uri);
-        if let Some(token) = token {
-            request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
-        }
-        let body = match body {
-            Some(json) => {
-                request = request.header(header::CONTENT_TYPE, "application/json");
-                Body::from(json.to_string())
-            }
-            None => Body::empty(),
-        };
-        let app = app(AppState { pool: pool.clone() });
-        let response = app.oneshot(request.body(body).unwrap()).await.unwrap();
-        let status = response.status();
-        let headers = response.headers().clone();
-        let bytes = response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes()
-            .to_vec();
-        Reply {
-            status,
-            headers,
-            bytes,
-        }
+        let state: AppState = bare_state(pool);
+        testing::call(&state, method, uri, token, body).await
     }
 
     fn poll() -> Option<Value> {
