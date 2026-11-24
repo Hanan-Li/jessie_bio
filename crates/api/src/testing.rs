@@ -271,6 +271,7 @@ pub async fn launch(pool: &PgPool, jobs: Vec<NewJob>) -> Uuid {
         &mut tx,
         &NewRun {
             compute_env: ENV.to_string(),
+            pipeline_version_id: None,
             jobs,
         },
     )

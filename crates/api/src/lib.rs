@@ -8,6 +8,7 @@
 //! - P0c PR 4, the UI endpoints, in parts. Part 1: the development token
 //!   (`users`) and validating a canvas (`pipelines`). Part 2: saving
 //!   pipelines (`pipelines`) and registering datasets (`datasets`).
+//!   Part 3: launching runs (`runs`).
 
 pub mod agent_api;
 pub mod agents;
@@ -17,6 +18,7 @@ pub mod error;
 pub mod node_library;
 pub mod pipelines;
 pub mod queue;
+pub mod runs;
 #[cfg(test)]
 mod testing;
 pub mod users;
@@ -63,6 +65,7 @@ pub fn app(state: AppState) -> Router {
         .merge(agent_api::routes())
         .merge(pipelines::routes())
         .merge(datasets::routes())
+        .merge(runs::routes())
         .with_state(state)
 }
 

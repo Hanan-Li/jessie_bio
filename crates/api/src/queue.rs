@@ -2,7 +2,7 @@
 //! this module.
 //!
 //! - [`enqueue_run`]: insert a run and its jobs (called by the launch
-//!   endpoint, P0c PR 4).
+//!   endpoint, `runs::launch`).
 //! - [`acquire`]: an agent claims the oldest queued job it may run.
 //! - [`heartbeat`]: the agent renews its lease; the reply may say "cancel".
 //! - [`complete`]: the agent's result moves the job to its next state and
@@ -142,6 +142,8 @@ impl JobKind {
 #[derive(Debug, Clone)]
 pub struct NewRun {
     pub compute_env: String,
+    /// The pipeline version it runs; `None` only in the queue's own tests.
+    pub pipeline_version_id: Option<Uuid>,
     /// In plan order: a job's index is its position here.
     pub jobs: Vec<NewJob>,
 }
@@ -165,9 +167,11 @@ pub struct NewJob {
 /// is all or nothing. Jobs without dependencies start `queued`, the rest
 /// `blocked`.
 pub async fn enqueue_run(tx: &mut Transaction<'_, Postgres>, run: &NewRun) -> anyhow::Result<Uuid> {
-    let run_id: Uuid = sqlx::query_scalar("INSERT INTO runs DEFAULT VALUES RETURNING id")
-        .fetch_one(&mut **tx)
-        .await?;
+    let run_id: Uuid =
+        sqlx::query_scalar("INSERT INTO runs (pipeline_version_id) VALUES ($1) RETURNING id")
+            .bind(run.pipeline_version_id)
+            .fetch_one(&mut **tx)
+            .await?;
 
     let mut job_ids = Vec::new();
     for (index, job) in run.jobs.iter().enumerate() {
