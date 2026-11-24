@@ -6,11 +6,13 @@
 //! - P0c PR 3: the queue (`queue`), agents and their tokens (`agents`),
 //!   the agent endpoints (`agent_api`), blobs (`blobs`) and the reaper.
 //! - P0c PR 4, the UI endpoints, in parts. Part 1: the development token
-//!   (`users`) and validating a canvas (`pipelines`).
+//!   (`users`) and validating a canvas (`pipelines`). Part 2: saving
+//!   pipelines (`pipelines`) and registering datasets (`datasets`).
 
 pub mod agent_api;
 pub mod agents;
 pub mod blobs;
+pub mod datasets;
 pub mod error;
 pub mod node_library;
 pub mod pipelines;
@@ -60,6 +62,7 @@ pub fn app(state: AppState) -> Router {
         .route("/healthz", get(health))
         .merge(agent_api::routes())
         .merge(pipelines::routes())
+        .merge(datasets::routes())
         .with_state(state)
 }
 

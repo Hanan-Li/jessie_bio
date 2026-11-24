@@ -2,13 +2,15 @@
 //!
 //! This is untrusted input. Parsing only checks its shape; whether the graph
 //! makes sense (ports exist, types match, no cycles) is checked later.
+//! `Serialize` is for the API, which stores each validated canvas as a
+//! pipeline version.
 
 use std::collections::BTreeMap;
 
 use anyhow::Context;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Canvas {
     pub nodes: Vec<Node>,
@@ -16,7 +18,7 @@ pub struct Canvas {
 }
 
 /// One box on the canvas: an instance of a node spec with its parameter values.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Node {
     /// Unique within the canvas, e.g. "fastqc_1".
@@ -31,14 +33,14 @@ pub struct Node {
 }
 
 /// A wire from one node's output port to another node's input port.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Edge {
     pub from: PortRef,
     pub to: PortRef,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortRef {
     pub node: String,
