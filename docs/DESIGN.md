@@ -213,7 +213,7 @@ Failures are typed, because each kind gets a different response: the environment
 
 Hashes are **self-describing**: `sha256:<hex>`, like container digests. The algorithm is an enum with one variant today; adding another (e.g. BLAKE3 for very large files) leaves old records readable.
 
-**Agent protocol (P0c).** Designed 2026-11-13. The messages are built (`protocol`, PR 1) and so is the control plane's side (`api`, PR 3); the agent's side, `agent serve`, is PR 5 (in progress: the blob cache and writing a lease to disk are built).
+**Agent protocol (P0c).** Designed 2026-11-13. The messages are built (`protocol`, PR 1) and so is the control plane's side (`api`, PR 3); the agent's side, `agent serve`, is PR 5 (in progress: the blob cache, writing a lease to disk and the HTTP client are built).
 
 *Leases.* An agent doesn't own a job; it holds a **lease**: a time-limited claim ("mine until T") that it renews with heartbeats. A lease isn't the job's run time but how long the agent may go silent, so a 6-hour alignment simply keeps renewing. If heartbeats stop (crash, `kill -9`, lost power, network partition), the lease expires and the reaper returns the job to the queue (§6). This is the only way to tell a dead agent from a slow one. Same idea as Pub/Sub ack deadlines or SQS visibility timeouts.
 
@@ -234,6 +234,8 @@ POST /api/agent/jobs/{id}/result       { attempt, result: JobResult }  → 200, 
 ```
 
 Short polling with backoff first; long polling (the server holds the request until a job is queued, via `LISTEN/NOTIFY`) later.
+
+As built (PR 5, part 2, `client.rs`): each call returns what the agent must act on as an enum, so "no work" (204), "lease lost" (409 on a heartbeat) and "stale" (409 on a result) are outcomes the caller has to `match`, not errors; errors are for an unreachable server, a refused token (401, with a hint to create a new one) or an unexpected status, described with the API's own error message. Every request has a 15 s timeout, so a hung connection can't hold a heartbeat past the 60 s lease. A blob download stops as soon as the body exceeds the size its reference promised, before the extra bytes are held in memory. The HTTP library honours `HTTPS_PROXY`/`NO_PROXY`, since on-prem networks often allow outbound traffic only through a proxy.
 
 *The lease response* is the agent's whole job description. It carries metadata only, never data bytes:
 
@@ -384,7 +386,7 @@ Compilation happens synchronously inside the request: the compiler takes millise
 2. **Built.** The `api` crate skeleton: axum, sqlx, migrations (embedded in the binary), configuration from flags or environment variables, `GET /healthz` (which also checks the database), graceful shutdown on Ctrl-C or SIGTERM, and loading the node library into Postgres with immutability enforced. Queries are runtime-checked (`sqlx::query`) for now: sqlx's compile-time checking (`query!`) needs a database or saved query metadata at build time, which can be added once there are enough queries to justify it. sqlx 0.9 accepts only `&'static str` SQL unless explicitly marked reviewed, so queries can't be assembled from runtime strings.
 3. **Built.** The queue module (`queue.rs`: `enqueue_run`, `acquire`, `heartbeat`, `complete`, `reap`, `cancel_run`), the four agent endpoints (`agent_api.rs`), agent tokens (`agents.rs`), and the reaper, a tokio task every 10 s. Tested against real Postgres (`#[sqlx::test]`), including 30 agents racing for 20 jobs and two results arriving at once. Agent tokens: `api create-compute-env` and `api create-agent` (which prints the token once); the database stores only the token's SHA-256, and tokens start with `jat_` so a leaked one is easy to spot. Launch isn't built yet, so `enqueue_run` is called only by tests until PR 4.
 4. **Built**, as four smaller PRs: (1) the development token (`users.rs`) and validate; (2) pipelines (`pipelines.rs`) and datasets (`datasets.rs`); (3) launch (`runs.rs`); (4) run status and cancel. Decisions made while building are above ("As built (PR 4)"). Tested against real Postgres, including launch → lease → result → status through `queue::acquire` and `queue::complete`; against a running server with `curl`, the project an agent fetches by digest was byte-identical to what the `compiler` CLI writes.
-5. `agent serve`, as two PRs: (1) **built**: the blob cache (`blobs.rs`) and writing a lease to disk (`job_dir.rs`), tested with blobs in memory and the unchanged staging; (2) the HTTP client, the polling loop with backoff, the heartbeat task, and posting results.
+5. `agent serve`, as three PRs: (1) **built**: the blob cache (`blobs.rs`) and writing a lease to disk (`job_dir.rs`), tested with blobs in memory and the unchanged staging; (2) **built**: the HTTP client (`client.rs`, reqwest with rustls and the system proxy settings), tested against a fake control plane in axum and checked against the real API; (3) the polling loop with backoff, the heartbeat task, and posting results.
 6. The end-to-end test in CI.
 
 ## 5. Execution Model

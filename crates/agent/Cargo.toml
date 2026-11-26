@@ -13,14 +13,19 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 nix = { workspace = true }
 protocol = { path = "../protocol" }
+reqwest = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+# A fake control plane for the HTTP client's tests.
+axum = { workspace = true }
 # Only to cross-check protocol's hasher in a test.
 sha2 = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["net"] }
 
 [lints]
 workspace = true
