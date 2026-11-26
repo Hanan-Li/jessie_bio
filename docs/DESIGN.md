@@ -599,6 +599,28 @@ No policy engine. (1) A static permission matrix in code (`{"run.launch": {Edito
 
 Compute-environment-scoped tokens; separate `/api/agent/*` surface limited to: lease jobs for own environment, report task state, upload artifacts for assigned runs. Agents can never browse project data — essential once agents run on-prem outside the trust boundary. Schema includes an optional per-environment project allowlist ("clinical projects only run on-prem"); UI for it deferred. Concrete per-request scoping (heartbeats and results only for the agent's own lease and attempt, blobs only for its environment's jobs) is in §4.3.
 
+### 8.4 Trust and threat model
+
+Decided 2026-11-26, in the architecture review. None of this is built; P0 runs with the trust described under "Today". Layers 1 and 4 are cheap and can come any time; layers 2 and 3 are needed before the first real on-prem install (P2).
+
+**Today.** The agent does whatever the control plane says. The lease points at a finished project (`main.nf`, `nextflow.config`, the node modules), and the agent runs it with Docker, which for a user in the `docker` group is effectively root. Dataset paths are any absolute path the UI registered. So whoever controls the control plane (an attacker, a bug, a leaked development token) can run any code, and read any file the agent's user can read, at every site with an agent. That is acceptable for a proof of concept on David's own machines. It isn't for an institution's HPC cluster, where the agent is the one piece of ours inside their network.
+
+The goal is that a compromised control plane can choose only *which* trusted steps run on *which* allowed data, never *what code* runs or *which files* are read. Each layer removes some of the control plane's power:
+
+1. **Agent-side policy.** The sysadmin writes a config file on the agent's machine at install, which the control plane can't change because it never touches the machine. It lists **data roots** (e.g. `/data/sequencing`), and later resource limits. Every input path in a lease is resolved fully (`..`, symbolic links) and the job is refused as a bad lease if any path is outside a data root. These are the same data roots the inventory flow uses (§4.3), enforced on leases as well, since in P0c a dataset can name any path. This protects the machine's files; it says nothing about the code.
+
+2. **Signed node releases.** A node version's module pins its container by digest, and Docker checks that digest when it pulls, so trusting a module's text means trusting its container too. When a node version is published (a CI release step), the statement "`fastqc/0.1.0` has module digest `sha256:…`" is signed (minisign or Sigstore) with a key **the control plane never holds**. The control plane stores the signature and passes it along in the lease. The agent is installed with the public keys it trusts (ours, and an institution's own bioinformatics core for its nodes, P3) and refuses a project whose modules lack a valid signature. Trust moves from "the server I'm talking to" to "the people who publish nodes", as with apt packages and signed container images.
+
+3. **The agent renders the wiring.** Layer 2 doesn't cover the generated files: a tampered `nextflow.config` could add a Docker option that mounts the whole disk. So the lease carries a **plan as data** (which node versions the job uses and how their ports connect, a slice of the `PipelineGraph`) instead of a finished `main.nf` and `nextflow.config`, and the agent renders them itself from templates compiled into its binary. Data can't carry hidden code: a plan is either valid or rejected. Codegen (templates and view structs) moves into a small crate that both the compiler and the agent depend on. The agent still never depends on validation or planning.
+
+   Considered and rejected: compiling on both sides and comparing digests. The modules are inputs to compilation, so if the agent got them from the control plane, both sides would compile the same malicious project and agree. If the agent has trusted modules of its own, its own output is already the trusted copy and comparing adds nothing. Comparing also needs the server's and every agent's compiler to produce byte-identical output, so every compiler change would need all agents upgraded at once. The plan format is versioned like every other protocol message (§4.1) instead.
+
+   With layers 2 and 3, every file the agent runs was either signed by a publisher it trusts or written by the agent itself.
+
+4. **Sandboxing**, for the case where the other layers fail or a tool is itself buggy or hostile. Mostly configuration in the generated `nextflow.config`, which after layer 3 the agent controls: **rootless containers** (rootless Docker or Podman, so a container escape gets the agent's unprivileged user, not root); **no network for tasks** (`--network none`; the few tools that download databases declare it in their spec and are allowed one by one); **read-only inputs**; and resource limits. Needs checking that the nf-core containers work rootless.
+
+**The other direction: agents are not trusted either.** An on-prem agent runs on a machine we don't control, so the control plane already scopes every agent request (§4.3). Once the cache exists (§5.2), a compromised agent could report false output digests and other users' runs would reuse the "results". Defences: an agent's results only fill cache entries for its own compute environment, and outputs are checked against their digests when read back from shared storage.
+
 ---
 
 ## 9. Technology Stack
@@ -674,6 +696,7 @@ Guiding principle: **buy everything that isn't the product.** The product is the
 - The frontend API design after P0c: read endpoints for the UI, an OpenAPI description and a generated TypeScript client (§4.3).
 - The inventory flow and samplesheet builder back end (P1, designed in §4.3).
 - Upload of outputs to workspace storage (customer storage or S3), which lifts the rule that dependent jobs run where their inputs are.
+- Building the trust layers (§8.4): agent-side data roots, signed node releases, agent-rendered wiring, sandboxing. Needed before the first real on-prem install.
 - (Decided 2026-11-13: protocol versioning, now in §4.1.)
 
 **Known gaps** (from the 2026-11-11 review of P0a/P0b; none blocks P0c):
