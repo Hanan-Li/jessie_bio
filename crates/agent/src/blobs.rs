@@ -59,6 +59,21 @@ impl BlobCache {
         BlobCache { root }
     }
 
+    /// `$XDG_CACHE_HOME/jessie-agent/blobs`, else
+    /// `~/.cache/jessie-agent/blobs`: the usual Linux places for caches.
+    pub fn default_root() -> anyhow::Result<PathBuf> {
+        let base = match std::env::var_os("XDG_CACHE_HOME") {
+            Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+            _ => {
+                let home = std::env::var_os("HOME").context(
+                    "neither XDG_CACHE_HOME nor HOME is set; pass --cache-dir to choose a cache",
+                )?;
+                PathBuf::from(home).join(".cache")
+            }
+        };
+        Ok(base.join("jessie-agent").join("blobs"))
+    }
+
     /// Where a blob lives in the cache. The digest's hex is checked when
     /// the digest is parsed, so it can't contain `/` or `..`.
     pub fn path_of(&self, blob: &BlobRef) -> PathBuf {

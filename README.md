@@ -191,6 +191,20 @@ curl -s -X POST localhost:8470/api/runs/$RUN/cancel -H "$H"  # cancel it
 | `GET /api/runs/{id}` | The run: state, jobs, their tasks and output files |
 | `POST /api/runs/{id}/cancel` | Cancel; running jobs stop at their next heartbeat. 409 if already finished |
 
-After launch, the job waits in the queue for an agent: the agent's
-`/api/agent/lease` call above now returns it. The agent's own polling loop,
-`agent serve`, is the next PR.
+After launch, the job waits in the queue for an agent.
+
+### Serve jobs with an agent
+
+`agent serve` leases jobs, runs them with Nextflow and reports each result,
+until Ctrl-C or SIGTERM (a running job is then stopped and reported
+`interrupted`, so the queue retries it; a second Ctrl-C kills it at once):
+
+```bash
+export JESSIE_AGENT_TOKEN=jat_...         # from create-agent; an env var keeps it out of `ps`
+cargo run -p agent -- serve --server http://127.0.0.1:8470 --work-dir out/agent --stub
+```
+
+Each attempt runs in `out/agent/jobs/<job_id>/<attempt>/` (the lease, the
+project, the input manifests and the run directory); project files are cached
+by digest in `~/.cache/jessie-agent/blobs` (`--cache-dir` to change). Leave out
+`--stub` for real runs with Docker.
