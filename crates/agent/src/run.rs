@@ -30,19 +30,22 @@ use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
-use crate::preflight::NEXTFLOW_VERSION;
 use crate::stage::StagedRun;
 
 /// Why a run was asked to stop before it finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
-    /// Someone asked for this job to stop (Ctrl-C now; the control plane
-    /// in P0c).
+    /// Someone asked for this job to stop: Ctrl-C in `agent run`, a
+    /// cancelled run in `agent serve`.
     Cancelled,
     TimedOut,
     /// The agent itself is being shut down (SIGTERM, e.g. from systemd).
     /// The job didn't fail and wasn't cancelled: it should be retried.
     Terminated,
+    /// `agent serve` only: the control plane answered a heartbeat with
+    /// 409, so another attempt holds the job now (a network partition,
+    /// say). The work is discarded and nothing is reported.
+    LeaseLost,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,12 +207,14 @@ async fn copy_lines(
 
 /// The `nextflow run` command for a staged job, started from its run
 /// directory (where Nextflow writes `trace.tsv` and its `.nextflow/` state).
-pub fn nextflow_command(staged: &StagedRun, stub: bool) -> Command {
-    let mut command = Command::new("nextflow");
+/// `program` is `nextflow` except in tests; `version` becomes `NXF_VER`
+/// (the pinned version locally, the compute environment's in `serve`).
+pub fn nextflow_command(staged: &StagedRun, stub: bool, program: &Path, version: &str) -> Command {
+    let mut command = Command::new(program);
     command
         .args(staged.nextflow_args(stub))
         .current_dir(&staged.run_dir)
-        .env("NXF_VER", NEXTFLOW_VERSION)
+        .env("NXF_VER", version)
         // Plain line-by-line progress instead of a redrawn terminal UI,
         // which would fill the log with escape codes.
         .env("NXF_ANSI_LOG", "false");

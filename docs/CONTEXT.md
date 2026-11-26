@@ -35,6 +35,8 @@ Background from the design and build conversations (2026-09-14 to 2026-11-11) th
 
 - **P0c UI endpoints, as built** (2026-11-22, PR 4): David first asked to build `agent serve` (PR 5) ahead of the design order, then changed his mind and kept the order. He then asked for the large PR 4 to be split into four smaller ones. Building it led to more checks at launch than the design listed (datasets must be on an agent of the run's compute environment, paired reads need two files per sample, a job's datasets must share an agent), to limiting sample names to path-safe characters, since they become directory names on agents' machines, and to reading the compiler's registry back from the database rather than from `nodes/`. A shell lesson from `register-dataset.sh`: an apostrophe inside `"${VAR:?message}"` opens a single-quoted string that runs on to the next `'` in the file, and bash's error points to that later line.
 
+- **P0c `agent serve`, as built** (2026-11-26, PR 5): split into three PRs to keep each small. Decided while building: anything that will fail the same way on every agent (a lease that contradicts itself, input files missing on this machine) is reported `failed`, anything the agent itself broke is `interrupted` so the queue retries it; heartbeats continue after a cancel and while the result is posted, so the lease can't lapse while Nextflow shuts down; Ctrl-C and SIGTERM both mean "shut down" in `serve`; the HTTP client uses rustls, so agents need no OpenSSL (building needs `cc` and `cmake`). Checked end to end in a cloud session with real Nextflow 26.10.5: a run launched through the API, stub-run by `agent serve`, reached `succeeded`.
+
 ## Progress log
 
 Dates are when the work reached `main`.
@@ -44,7 +46,8 @@ Dates are when the work reached `main`.
 - 2026-11-10: **first real run**: the compiled FastQC → MultiQC project on real reads with Docker.
 - 2026-11-11: the agent: preflight and staging (#9), `agent run` (#10), trace, hashes, output manifests and `result.json` (#11). Full review of P0a/P0b; fixes for stopping (#12) and parameters plus the README (#13). Remaining gaps: DESIGN.md §12.
 - 2026-11-13 to 2026-11-16: the P0c design: agent protocol (#15), queue and control-plane API (#16). P0c PR 1, the `protocol` messages (#17), and PR 2, the `api` skeleton (#18).
-- 2026-11-22 to 2026-11-24: P0c PR 3, the queue, agent endpoints and reaper (#19). PR 4, the UI endpoints, was split into four smaller PRs at David's request (one large PR was too much to review): part 1, the development token and validate (#20); part 2, saving pipelines and registering datasets (#21); part 3, launch (#22); part 4, run status and cancel.
+- 2026-11-22 to 2026-11-24: P0c PR 3, the queue, agent endpoints and reaper (#19). PR 4, the UI endpoints, was split into four smaller PRs at David's request (one large PR was too much to review): part 1, the development token and validate (#20); part 2, saving pipelines and registering datasets (#21); part 3, launch (#22); part 4, run status and cancel (#23).
+- 2026-11-26: P0c PR 5, `agent serve`, in three parts: the blob cache and writing a lease to disk (#24), the HTTP client (#25), and the serve loop with heartbeats and results.
 
 ## Honest market assessment (2026-09-27)
 

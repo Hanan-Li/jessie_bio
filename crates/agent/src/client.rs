@@ -36,6 +36,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// What the agent sends as `agent_version`, from Cargo.toml at build time.
 pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Cheap to clone: `reqwest::Client` shares one connection pool between
+/// its clones, so the heartbeat task gets its own handle to it.
+#[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
     /// e.g. `https://jessie.example.org`, without a trailing `/`.
@@ -206,19 +209,8 @@ async fn error_from(response: Response) -> anyhow::Error {
 
 #[cfg(test)]
 mod tests {
-    //! Against a small fake control plane (axum on a random local port), so
-    //! these test real HTTP: headers, status codes, bodies. The real API is
-    //! tested against the same protocol types in the `api` crate, and the
-    //! two meet in the end-to-end test.
-
     use std::collections::BTreeMap;
-    use std::sync::{Arc, Mutex};
 
-    use axum::Router;
-    use axum::extract::{Path, State};
-    use axum::http::{HeaderMap, StatusCode as AxumStatus};
-    use axum::response::{IntoResponse, Response as AxumResponse};
-    use axum::routing::{get, post};
     use protocol::digest::HashAlgorithm;
     use protocol::job::JobInterface;
     use protocol::lease::{Lease, RunRef, Settings};
@@ -227,111 +219,13 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::fake_server::{self, Fake, Heartbeats, TOKEN};
 
-    const TOKEN: &str = "jat_test-token";
-
-    /// What the fake server does, and what it saw.
-    #[derive(Default)]
-    struct Fake {
-        /// Answer to the next lease call; `None` → 204.
-        lease: Option<Value>,
-        /// The heartbeat status code to answer with.
-        heartbeat_conflict: bool,
-        cancel: bool,
-        blobs: BTreeMap<String, Vec<u8>>,
-        /// Request bodies received, by path.
-        seen: Vec<(String, Value)>,
-    }
-
-    type Shared = Arc<Mutex<Fake>>;
-
-    fn authorized(headers: &HeaderMap) -> bool {
-        headers.get("authorization").and_then(|v| v.to_str().ok())
-            == Some(&format!("Bearer {TOKEN}"))
-    }
-
-    fn unauthorized() -> AxumResponse {
-        (
-            AxumStatus::UNAUTHORIZED,
-            axum::Json(json!({ "error": { "code": "unauthorized", "message": "no" } })),
-        )
-            .into_response()
-    }
-
-    async fn lease(
-        State(fake): State<Shared>,
-        headers: HeaderMap,
-        body: axum::Json<Value>,
-    ) -> AxumResponse {
-        if !authorized(&headers) {
-            return unauthorized();
-        }
-        let mut fake = fake.lock().unwrap();
-        fake.seen.push(("lease".to_string(), body.0));
-        match fake.lease.take() {
-            Some(lease) => axum::Json(lease).into_response(),
-            None => AxumStatus::NO_CONTENT.into_response(),
-        }
-    }
-
-    async fn heartbeat(
-        State(fake): State<Shared>,
-        Path(id): Path<String>,
-        body: axum::Json<Value>,
-    ) -> AxumResponse {
-        let mut fake = fake.lock().unwrap();
-        fake.seen.push((format!("heartbeat {id}"), body.0));
-        if fake.heartbeat_conflict {
-            return (
-                AxumStatus::CONFLICT,
-                axum::Json(json!({ "error": { "code": "lease_lost", "message": "gone" } })),
-            )
-                .into_response();
-        }
-        let action = if fake.cancel { "cancel" } else { "continue" };
-        axum::Json(json!({ "format_version": 1, "action": action })).into_response()
-    }
-
-    async fn result(
-        State(fake): State<Shared>,
-        Path(id): Path<String>,
-        body: axum::Json<Value>,
-    ) -> AxumResponse {
-        let mut fake = fake.lock().unwrap();
-        let stale = body.0["attempt"] != 1;
-        fake.seen.push((format!("result {id}"), body.0));
-        if stale {
-            return AxumStatus::CONFLICT.into_response();
-        }
-        axum::Json(json!({ "job_state": "succeeded" })).into_response()
-    }
-
-    async fn blob(State(fake): State<Shared>, Path(digest): Path<String>) -> AxumResponse {
-        match fake.lock().unwrap().blobs.get(&digest) {
-            Some(bytes) => bytes.clone().into_response(),
-            None => (
-                AxumStatus::NOT_FOUND,
-                axum::Json(json!({ "error": { "code": "not_found", "message": "no such blob" } })),
-            )
-                .into_response(),
-        }
-    }
-
-    /// Start the fake on a random port; returns its state and a client.
-    async fn serve(fake: Fake) -> (Shared, Client) {
-        let shared = Arc::new(Mutex::new(fake));
-        let app = Router::new()
-            .route("/api/agent/lease", post(lease))
-            .route("/api/agent/jobs/{id}/heartbeat", post(heartbeat))
-            .route("/api/agent/jobs/{id}/result", post(result))
-            .route("/api/agent/blobs/{digest}", get(blob))
-            .with_state(shared.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    async fn serve(fake: Fake) -> (fake_server::Shared, Client) {
+        let (fake, base) = fake_server::start(fake).await;
         // A trailing `/` is accepted and trimmed.
-        let client = Client::new(&format!("http://{address}/"), TOKEN).unwrap();
-        (shared, client)
+        let client = Client::new(&format!("{base}/"), TOKEN).unwrap();
+        (fake, client)
     }
 
     fn lease_json() -> Value {
@@ -379,10 +273,10 @@ mod tests {
 
     #[tokio::test]
     async fn no_work_is_none_and_a_lease_is_parsed() {
-        let (fake, client) = serve(Fake::default()).await;
+        let (fake, client) = serve(Fake::new()).await;
         assert_eq!(client.lease().await.unwrap(), None);
 
-        fake.lock().unwrap().lease = Some(lease_json());
+        fake.lock().unwrap().leases.push_back(lease_json());
         let lease = client.lease().await.unwrap().expect("a lease");
         assert_eq!(lease.lease.job_id, "job-1");
 
@@ -395,11 +289,9 @@ mod tests {
     async fn a_lease_in_a_newer_format_says_to_upgrade() {
         let mut newer = lease_json();
         newer["format_version"] = json!(2);
-        let (_fake, client) = serve(Fake {
-            lease: Some(newer),
-            ..Fake::default()
-        })
-        .await;
+        let mut fake = Fake::new();
+        fake.leases.push_back(newer);
+        let (_fake, client) = serve(fake).await;
 
         let err = client.lease().await.unwrap_err();
         assert!(format!("{err:#}").contains("upgrade"), "{err:#}");
@@ -407,7 +299,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_refused_token_is_an_error_that_says_so() {
-        let (_fake, good) = serve(Fake::default()).await;
+        let (_fake, good) = serve(Fake::new()).await;
         let bad = Client::new(&good.base, "jat_wrong").unwrap();
 
         let err = bad.lease().await.unwrap_err();
@@ -416,7 +308,7 @@ mod tests {
 
     #[tokio::test]
     async fn heartbeats_renew_cancel_or_find_the_lease_lost() {
-        let (fake, client) = serve(Fake::default()).await;
+        let (fake, client) = serve(Fake::new()).await;
         let beat = HeartbeatRequest {
             format_version: FormatVersion::current(),
             attempt: 1,
@@ -427,12 +319,12 @@ mod tests {
             client.heartbeat("job-1", &beat).await.unwrap(),
             HeartbeatOutcome::Renewed(HeartbeatAction::Continue)
         );
-        fake.lock().unwrap().cancel = true;
+        fake.lock().unwrap().heartbeats = Heartbeats::Cancel;
         assert_eq!(
             client.heartbeat("job-1", &beat).await.unwrap(),
             HeartbeatOutcome::Renewed(HeartbeatAction::Cancel)
         );
-        fake.lock().unwrap().heartbeat_conflict = true;
+        fake.lock().unwrap().heartbeats = Heartbeats::Conflict;
         assert_eq!(
             client.heartbeat("job-1", &beat).await.unwrap(),
             HeartbeatOutcome::LeaseLost
@@ -445,7 +337,7 @@ mod tests {
 
     #[tokio::test]
     async fn results_are_accepted_or_stale() {
-        let (_fake, client) = serve(Fake::default()).await;
+        let (_fake, client) = serve(Fake::new()).await;
         assert_eq!(
             client.result("job-1", &report(1)).await.unwrap(),
             ResultOutcome::Accepted
@@ -459,7 +351,7 @@ mod tests {
     #[tokio::test]
     async fn fetches_blobs_and_refuses_oversized_bodies() {
         let small = BlobRef::of(HashAlgorithm::Sha256, b"process FASTQC {}");
-        let mut fake = Fake::default();
+        let mut fake = Fake::new();
         fake.blobs
             .insert(small.digest.to_string(), b"process FASTQC {}".to_vec());
         let (fake, client) = serve(fake).await;
@@ -477,7 +369,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_api_error_is_reported_with_its_message() {
-        let (_fake, client) = serve(Fake::default()).await;
+        let (_fake, client) = serve(Fake::new()).await;
         let missing = BlobRef::of(HashAlgorithm::Sha256, b"nobody has this");
 
         let err = client.fetch(&missing).await.unwrap_err();

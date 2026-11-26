@@ -1,8 +1,9 @@
 //! `agent`: runs compiled jobs and reports what happened (DESIGN.md §4.1).
 //!
-//! P0b is local mode: jobs come from directories on disk, not from a
-//! server. `check` (preflight), `stage` (inputs + run directory), and
-//! `run` (check, stage, then run Nextflow and supervise it).
+//! Local mode (P0b) runs jobs from directories on disk: `check`
+//! (preflight), `stage` (inputs + run directory), and `run` (check, stage,
+//! then run Nextflow and supervise it). `serve` (P0c) leases jobs from the
+//! control plane and runs them the same way, until stopped.
 //!
 //! Exit codes, one per kind of outcome, so scripts (and later the control
 //! plane) can tell them apart:
@@ -16,21 +17,22 @@
 //! - 143: the agent was shut down (SIGTERM) mid-job; the job should be
 //!   retried. 128 + 15, the shell convention for SIGTERM.
 //!
+//! `serve` reports each job's outcome to the control plane instead, so it
+//! exits 0 when stopped, 2 if preflight fails, 1 on its own failure.
+//!
 //! Stopping: the first Ctrl-C or SIGTERM asks Nextflow to stop and waits
 //! up to a grace period; a second one kills it at once.
 
-// `blobs`, `client` and `job_dir` are used by `agent serve`, which arrives in the
-// next PR; until then only their tests call them.
-#[cfg_attr(not(test), allow(dead_code))]
 mod blobs;
-#[cfg_attr(not(test), allow(dead_code))]
 mod client;
 mod collect;
+#[cfg(test)]
+mod fake_server;
 mod hashing;
-#[cfg_attr(not(test), allow(dead_code))]
 mod job_dir;
 mod preflight;
 mod run;
+mod serve;
 mod stage;
 mod trace;
 
@@ -45,6 +47,8 @@ use protocol::result::{JobResult, JobStatus, TaskStatus};
 use protocol::version::FormatVersion;
 use tokio::signal::unix::{SignalKind, signal};
 
+use crate::blobs::BlobCache;
+use crate::client::Client;
 use crate::run::{Outcome, StopReason};
 use crate::stage::{InputArg, StagedRun};
 
@@ -107,6 +111,27 @@ enum Command {
         #[arg(long, default_value = "sha256", value_parser = |text: &str| text.parse::<HashAlgorithm>())]
         hash: HashAlgorithm,
     },
+    /// Lease jobs from the control plane and run them, until Ctrl-C or
+    /// SIGTERM.
+    Serve {
+        /// The control plane's address, e.g. `https://jessie.example.org`.
+        #[arg(long, env = "JESSIE_SERVER")]
+        server: String,
+        /// This agent's token (from `api create-agent`). Prefer the
+        /// environment variable: a flag shows up in `ps` for every user on
+        /// the machine.
+        #[arg(long, env = "JESSIE_AGENT_TOKEN", hide_env_values = true)]
+        token: String,
+        /// Where jobs run: each attempt gets `jobs/<job_id>/<attempt>/`.
+        #[arg(long)]
+        work_dir: PathBuf,
+        /// The blob cache [default: ~/.cache/jessie-agent/blobs].
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
+        /// Stub runs: modules' `stub:` blocks, Docker off.
+        #[arg(long)]
+        stub: bool,
+    },
 }
 
 // `#[tokio::main]` turns `async fn main` into a normal `main` that starts
@@ -155,11 +180,46 @@ async fn main() -> anyhow::Result<ExitCode> {
             let force = async {
                 next_stop_signal().await;
             };
-            let command = run::nextflow_command(&staged, stub);
+            let command = run::nextflow_command(
+                &staged,
+                stub,
+                Path::new("nextflow"),
+                preflight::NEXTFLOW_VERSION,
+            );
             let outcome =
                 run::supervise(command, &staged.logs_dir(), true, stop, force, GRACE).await?;
             let result = finish(outcome, &staged, hash).await?;
             Ok(report(outcome, &staged, &result))
+        }
+        Command::Serve {
+            server,
+            token,
+            work_dir,
+            cache_dir,
+            stub,
+        } => {
+            if check(!stub).await != ExitCode::SUCCESS {
+                return Ok(ExitCode::from(ENVIRONMENT_FAILED));
+            }
+            let cache_dir = match cache_dir {
+                Some(dir) => dir,
+                None => BlobCache::default_root()?,
+            };
+            let config = serve::Config {
+                work_dir: std::path::absolute(&work_dir).context("resolving --work-dir")?,
+                stub,
+                nextflow: PathBuf::from("nextflow"),
+                grace: GRACE,
+            };
+            let client = Client::new(&server, &token)?;
+            let signals = serve::listen_for_signals()?;
+            println!(
+                "serving jobs from {server}; work in {}, blob cache in {}",
+                config.work_dir.display(),
+                cache_dir.display()
+            );
+            serve::serve(&client, &BlobCache::new(cache_dir), &config, signals).await?;
+            Ok(ExitCode::SUCCESS)
         }
     }
 }
@@ -230,8 +290,10 @@ async fn finish(
             reason: StopReason::Cancelled,
             ..
         } => JobStatus::Cancelled,
+        // A lost lease is never reported (the control plane would refuse
+        // it), but the local result.json still says what happened to it.
         Outcome::Stopped {
-            reason: StopReason::Terminated,
+            reason: StopReason::Terminated | StopReason::LeaseLost,
             ..
         } => JobStatus::Interrupted,
     };
@@ -335,6 +397,12 @@ fn report(outcome: Outcome, staged: &StagedRun, result: &JobResult) -> ExitCode 
                 }
                 StopReason::Terminated => {
                     eprintln!("agent shut down; job interrupted ({how}), retry it");
+                    ExitCode::from(INTERRUPTED)
+                }
+                StopReason::LeaseLost => {
+                    // Only `agent serve` stops for this, and it doesn't
+                    // use exit codes per job; listed so `match` is complete.
+                    eprintln!("lease lost; job stopped ({how}) and its work discarded");
                     ExitCode::from(INTERRUPTED)
                 }
             }

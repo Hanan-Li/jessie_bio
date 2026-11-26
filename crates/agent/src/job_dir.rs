@@ -286,25 +286,25 @@ async fn write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use protocol::blob::BlobRef;
+pub mod testing {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    use protocol::blob::{BlobRef, Tree};
     use protocol::digest::HashAlgorithm;
-    use protocol::lease::{InputFile, Lease, RunRef, Settings};
-    use protocol::version::FormatVersion;
+    use protocol::job::JobInterface;
 
-    use super::*;
     use crate::blobs::testing::MemorySource;
-    use crate::stage;
 
-    const SHA: HashAlgorithm = HashAlgorithm::Sha256;
-    const EXPECTED: &str = concat!(
+    pub const EXPECTED: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../compiler/testdata/expected/fastqc_multiqc"
     );
 
     /// The compiler's real output for the fastqc → multiqc canvas, as the
     /// API would store it: its blobs in a source, its tree's reference.
-    fn project() -> (BlobRef, JobInterface, MemorySource) {
+    pub fn project() -> (BlobRef, JobInterface, MemorySource) {
+        let sha = HashAlgorithm::Sha256;
         let mut files = BTreeMap::new();
         for name in ["job.json", "main.nf", "nextflow.config"] {
             let bytes = std::fs::read(Path::new(EXPECTED).join(name)).unwrap();
@@ -317,8 +317,8 @@ mod tests {
         );
         let interface = serde_json::from_slice(&files["job.json"]).unwrap();
 
-        let (tree, blobs) = Tree::from_files(SHA, files).unwrap();
-        let tree_blob = tree.to_blob(SHA);
+        let (tree, blobs) = Tree::from_files(sha, files).unwrap();
+        let tree_blob = tree.to_blob(sha);
         let mut source = MemorySource::default();
         for blob in blobs {
             source.add(&blob.reference, blob.bytes);
@@ -326,7 +326,20 @@ mod tests {
         source.add(&tree_blob.reference, tree_blob.bytes);
         (tree_blob.reference, interface, source)
     }
+}
 
+#[cfg(test)]
+mod tests {
+    use protocol::blob::BlobRef;
+    use protocol::digest::HashAlgorithm;
+    use protocol::lease::{InputFile, Lease, RunRef, Settings};
+    use protocol::version::FormatVersion;
+
+    use super::testing::{EXPECTED, project};
+    use super::*;
+    use crate::stage;
+
+    const SHA: HashAlgorithm = HashAlgorithm::Sha256;
     fn file(sample: Option<&str>, uri: &Path) -> InputFile {
         InputFile {
             sample: sample.map(str::to_string),
