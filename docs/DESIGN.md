@@ -1,8 +1,8 @@
 # Jessie's Bioinformatics Platform — Design Document
 
-**Status:** Draft v3 · **Date:** 2026-11-11 (v2: 2026-09-27, v1: 2026-09-14) · **Author:** David (with design assistance from Claude)
+**Status:** Draft v3 · **Date:** 2026-11-11, last updated 2026-11-26 (v2: 2026-09-27, v1: 2026-09-14) · **Author:** David (with design assistance from Claude)
 
-**Implementation:** P0a (compiler) and P0b (agent, local mode) are built and merged; P0c (control plane) is being built: the protocol, the API skeleton, the queue with the agent endpoints, and the UI endpoints with launch are done (§4.3, build order). See §10.
+**Implementation:** P0a (compiler) and P0b (agent, local mode) are built and merged; P0c (control plane) is built except its last step, the end-to-end test in CI: the protocol, the API skeleton, the queue with the agent endpoints, the UI endpoints with launch, and `agent serve` are done (§4.3, build order). See §10.
 
 ---
 
@@ -173,6 +173,8 @@ No hosted notebooks in v1. Instead, **analysis nodes** are cheap to re-run: a sc
                     Workspace data planes (bytes live here)
 ```
 
+This is the target. **As built (end of P0c):** no Web UI yet (`curl` and scripts call the UI endpoints); no Clerk, only a development token (§4.3); no separate DAG scheduler, since each job transition happens inside the transaction that causes it (§6); no cache index yet (§5.2). Agents use Nextflow's local executor with Docker, and their data plane is their own disk: outputs stay there (§4.1). The API server is one binary that also runs the reaper and the setup commands, with the compiler inside it as a library.
+
 **Core principle: the control plane stores metadata only; bytes live in the workspace data plane.** This single rule resolves the tension between "seamless managed product" and "institutions won't put sensitive data on a third-party site."
 
 ### 4.1 Runner agent — one execution abstraction
@@ -193,10 +195,10 @@ Agents authenticate with compute-environment-scoped tokens against a separate `/
 
 1. **Preflight**: Java 17+, Nextflow at the pinned version (enforced with `NXF_VER`), Docker reachable without `sudo` (skipped for stub runs).
 2. **Stage**: read `job.json`; check every input has exactly one manifest of the right shape and every file it lists exists; write normalized copies (absolute paths) into the run directory. The project directory is never modified, so one compiled project can be run many times.
-3. **Run**: `nextflow run` as a child process, in its own process group, from the run directory, both output streams drained concurrently into log files. A stop (Ctrl-C, a time limit, or SIGTERM to the agent itself) sends SIGTERM to Nextflow, which stops its containers; after a grace period, or at a second Ctrl-C/SIGTERM, the whole process group gets SIGKILL. SIGTERM to the agent (systemd, a sysadmin) is handled like any other stop, so Nextflow never outlives the agent and `result.json` is always written; the job's status is then `interrupted`, meaning "retry it", distinct from `cancelled`.
+3. **Run**: `nextflow run` as a child process, in its own process group, from the run directory, both output streams drained concurrently into log files. A stop (Ctrl-C, a time limit, or SIGTERM to the agent itself) sends SIGTERM to Nextflow, which stops its containers; after a grace period, or at a second Ctrl-C/SIGTERM, the whole process group gets SIGKILL. SIGTERM to the agent (systemd, a sysadmin) is handled like any other stop, so Nextflow doesn't outlive a stop the agent can see and `result.json` is written; the job's status is then `interrupted`, meaning "retry it", distinct from `cancelled`. A stop the agent can't see is different: if the agent is killed with SIGKILL or crashes, Nextflow, in its own process group, keeps running as an orphan while the job is reaped and retried (§12).
 4. **Parse** `trace.tsv` into typed task records.
 5. **Collect**: walk `results/<name>/<sample>/`, hash every file, write one output manifest per job output.
-6. **Report**: `result.json` (a `protocol` type): status (`succeeded`, `failed`, `timed_out`, `cancelled`, `interrupted`), tasks, outputs with hashes and sizes, and warnings (e.g. an unparseable trace, which no longer prevents the report). In P0c this becomes the body of the agent's "job finished" call.
+6. **Report**: `result.json` (a `protocol` type): status (`succeeded`, `failed`, `timed_out`, `cancelled`, `interrupted`), tasks, outputs with hashes and sizes, and warnings (e.g. an unparseable trace, which no longer prevents the report). In `agent serve` it is the body of the result call (`POST /api/agent/jobs/{id}/result`).
 
 Run directory: `inputs/` (staged manifests), `work/` (Nextflow work dir), `results/`, `logs/`, `trace.tsv`, `outputs/` (output manifests), `result.json`.
 
@@ -307,7 +309,7 @@ Byte access from the browser:
 
 ### 4.3 Control-plane API
 
-Designed 2026-11-16 for P0c; being built (the build order is at the end of this section). The `api` crate is where everything meets: it calls the `compiler` crate as an in-process library (validation, planning, code generation), uses the `protocol` types for agent messages, and owns Postgres. The compiler stays pure; the agent still never depends on it.
+Designed 2026-11-16 for P0c; built except the end-to-end test (the build order is at the end of this section). The `api` crate is where everything meets: it calls the `compiler` crate as an in-process library (validation, planning, code generation), uses the `protocol` types for agent messages, and owns Postgres. The compiler stays pure; the agent still never depends on it.
 
 **Three kinds of caller, kept apart** (§8.3, "agents are not users"):
 
@@ -629,15 +631,15 @@ The goal is that a compromised control plane can choose only *which* trusted ste
 |---|---|---|
 | Frontend | Next.js, React Flow, shadcn/ui + Tailwind, TanStack Query | React Flow = canvas mechanics solved |
 | Plots | Vega-Lite specs rendered client-side | Interactive + paper-grade export, mature spec format |
-| Backend language | **Rust 1.98** (pinned in `rust-toolchain.toml`), one Cargo workspace: `compiler`, `agent`, `protocol` (built); `api` (P0c) | Compiler must live in the control plane; one language means no seam through it. Node science is containerized, so platform language is independent of the bioinformatics ecosystem. |
-| API | axum + sqlx (compile-time-checked SQL, sqlx migrations), utoipa → OpenAPI → generated TS client | Mainstream Rust web stack; typed end to end |
+| Backend language | **Rust 1.98** (pinned in `rust-toolchain.toml`), one Cargo workspace: `compiler`, `agent`, `protocol`, `api` (all built) | Compiler must live in the control plane; one language means no seam through it. Node science is containerized, so platform language is independent of the bioinformatics ecosystem. |
+| API | axum + sqlx (runtime-checked SQL for now, compile-time checking later, §4.3; migrations embedded in the binary); utoipa → OpenAPI → generated TS client with the frontend | Mainstream Rust web stack; typed end to end |
 | Compiler | Rust crate: serde (canvas JSON), petgraph (DAG, segmentation, descendants), minijinja (DSL2 codegen), clap (`compiler` CLI) | Exhaustive `match` over the semantic type system |
 | Protocol | Rust crate shared by compiler, agent and API: serde, csv, sha2. Job interfaces (`job.json`), manifests, digests and the shared hasher, job results (`result.json`), port types, the agent messages (lease, heartbeat, result), blobs and trees, format versions | Formats that cross process boundaries are defined once, so both sides agree at compile time; versioned per §4.1 |
 | DB | Managed Postgres (Neon or RDS) | Single stateful system: app data + queue + provenance |
 | Queue | Postgres SKIP LOCKED (§6), workers as tokio tasks | No broker to operate |
 | Auth | Clerk (or Cognito); WorkOS for SSO when demanded | Buy, don't build |
-| Agent | Rust binary: tokio (process supervision), nix (signals), sha2 (hashing), clap; containers via Docker; JVM + Nextflow on batch hosts (§4.1). Depends on `protocol`, never on `compiler` | Drop-in install on HPC head nodes; shares protocol types with the API |
-| Testing / CI | Built: cargo test (unit + CLI integration tests), expected-output files for codegen, `nextflow lint` on the node library and on a generated project, and `scripts/stub-run.sh` (compile → lint → `agent run --stub`) in GitHub Actions, with Rust and Nextflow versions pinned. P0c adds testcontainers (real Postgres) and an E2E run | |
+| Agent | Rust binary: tokio (process supervision), nix (signals), sha2 (hashing), clap, reqwest with rustls (the HTTP client, so no OpenSSL); containers via Docker; JVM + Nextflow on batch hosts (§4.1). Depends on `protocol`, never on `compiler` | Drop-in install on HPC head nodes; shares protocol types with the API |
+| Testing / CI | Built: cargo test (unit + CLI integration tests), expected-output files for codegen, `nextflow lint` on the node library and on a generated project, and `scripts/stub-run.sh` (compile → lint → `agent run --stub`) in GitHub Actions, with Rust and Nextflow versions pinned. The api tests run against real Postgres with `#[sqlx::test]` (a fresh database per test), on a Postgres service container in CI. Last P0c step: an E2E run with stub runs (§4.3) | |
 | Workflow engine | Nextflow DSL2 (generated) | Ecosystem, executor portability, nf-core modules |
 | MVP compute | One EC2 instance: agent + Nextflow local executor + Docker | Exercises the full architecture with near-zero infra; AWS Batch is a config upgrade later |
 | Object storage | S3, per-workspace prefixes, presigned URLs | |
@@ -648,11 +650,11 @@ Guiding principle: **buy everything that isn't the product.** The product is the
 
 ## 10. Roadmap
 
-**P0 — walking skeleton, built inside-out.** Goal: a hardcoded 2-node canvas runs end-to-end through the real spine (API → queue → agent lease → Nextflow → artifact upload → hash registration → viewable result). Ordered so the Rust learning curve rises gradually (easiest crate first):
+**P0 — walking skeleton, built inside-out.** Goal: a hardcoded 2-node canvas runs end-to-end through the real spine (API → queue → agent lease → Nextflow → hash registration → viewable result; outputs stay on the agent's disk in P0, and artifact upload comes later, §4.1). Ordered so the Rust learning curve rises gradually (easiest crate first):
 
 - **P0a — compiler core. Done.** Pure Rust, no async/DB: canvas JSON → validated `PipelineGraph` → `ExecutionPlan` (convex segments) → job interfaces → Nextflow projects, plus the `compiler` CLI and the node library. Expected-output tests; generated code linted and stub-run by Nextflow in CI.
 - **P0b — agent, local mode. Done for batch jobs.** `agent check` / `stage` / `run`: preflight, staging, supervised Nextflow run with clean stopping, trace parsing, SHA-256 output hashes, output manifests and `result.json`. Verified with a real Docker run on the nextflow-io/rnaseq-nf test reads. A plain Linux process that runs a compiled segment with Nextflow's **local executor** + Docker, parses the trace file, hashes and stores outputs. No server. Kubernetes is deliberately not used here: where tasks run is a Nextflow executor setting (§5.4 level 1), so `k8s`, like Slurm and AWS Batch, is a later config option, not part of the agent's architecture.
-- **P0c — control plane. In progress** (PRs 1–4 of the build order in §4.3 are done). Designed: the agent protocol (leases, messages, project files by digest, local outputs, versioning) is decided in §4.1, the queue (job and run states, transitions, retries, placement, why Postgres) in §6, and the control-plane API in §4.3. The design walkthrough is complete; building starts with the `protocol` messages (§4.3, build order). axum + sqlx + SKIP LOCKED queue; agent switches from local mode to leasing over HTTPS. One GitHub Actions E2E test: Postgres service container + real tiny Nextflow run.
+- **P0c — control plane. Built except the end-to-end test** (PRs 1–5 of the build order in §4.3 are done; PR 6 is the test). The agent protocol (leases, messages, project files by digest, local outputs, versioning) is in §4.1, the queue (job and run states, transitions, retries, placement, why Postgres) in §6, and the control-plane API in §4.3. axum + sqlx + SKIP LOCKED queue; `agent serve` leases jobs over HTTPS. Last: one GitHub Actions E2E test with a Postgres service container, the API and `agent serve`, using stub runs (real Docker runs stay a local check).
 
 **P1 — MVP: RNA-seq vertical slice, managed tier only.**
 
@@ -699,7 +701,7 @@ Guiding principle: **buy everything that isn't the product.** The product is the
 - Building the trust layers (§8.4): agent-side data roots, signed node releases, agent-rendered wiring, sandboxing. Needed before the first real on-prem install.
 - (Decided 2026-11-13: protocol versioning, now in §4.1.)
 
-**Known gaps** (from the 2026-11-11 review of P0a/P0b; none blocks P0c):
+**Known gaps** (from the 2026-11-11 review of P0a/P0b and from building P0c):
 
 - Analysis jobs: planned and segmented, but neither compiled nor executed yet.
 - Directory outputs (e.g. `multiqc_data/`) aren't collected; no current port is a directory.
@@ -710,5 +712,6 @@ Guiding principle: **buy everything that isn't the product.** The product is the
 - A job pinned to an agent that is gone for good stays `queued` forever; it should fail after a while (§6, Placement).
 - Datasets carry no semantic type, so launch can't check that a dataset fits the input it feeds beyond the file count of FASTQ inputs. FileRecords with types come with the inventory flow (P1).
 - At launch a dataset's samples are ordered by name, not in the order they were registered.
+- If the agent is killed with SIGKILL or crashes mid-job, Nextflow (in its own process group) keeps running as an orphan while the job is reaped and retried, so it can run twice on the same machine.
 - `agent serve`: a job that never ran (a bad lease, missing input files) is reported `failed` with no tasks, so its failure reason reads "Nextflow exited abnormally and no task failed"; the real reason is in the result's warnings. A typed status for it needs a `format_version` bump. Heartbeats don't report progress yet; polling has no jitter, so many agents restarted together poll in step; a shutdown while a lease request is in flight abandons it, and that lease expires and is retried (costing an attempt).
 - The control plane polls: no `LISTEN/NOTIFY` long polling yet (§4.1). Agents' `last_seen_at` is recorded on each lease poll but nothing reads it yet (a "which agents are alive" view belongs to the UI).

@@ -48,7 +48,7 @@ Dates are when the work reached `main`.
 - 2026-11-11: the agent: preflight and staging (#9), `agent run` (#10), trace, hashes, output manifests and `result.json` (#11). Full review of P0a/P0b; fixes for stopping (#12) and parameters plus the README (#13). Remaining gaps: DESIGN.md §12.
 - 2026-11-13 to 2026-11-16: the P0c design: agent protocol (#15), queue and control-plane API (#16). P0c PR 1, the `protocol` messages (#17), and PR 2, the `api` skeleton (#18).
 - 2026-11-22 to 2026-11-24: P0c PR 3, the queue, agent endpoints and reaper (#19). PR 4, the UI endpoints, was split into four smaller PRs at David's request (one large PR was too much to review): part 1, the development token and validate (#20); part 2, saving pipelines and registering datasets (#21); part 3, launch (#22); part 4, run status and cancel (#23).
-- 2026-11-26: P0c PR 5, `agent serve`, in three parts: the blob cache and writing a lease to disk (#24), the HTTP client (#25), and the serve loop with heartbeats and results.
+- 2026-11-26: P0c PR 5, `agent serve`, in three parts: the blob cache and writing a lease to disk (#24), the HTTP client (#25), and the serve loop with heartbeats and results (#26). DESIGN.md §8.4, the trust and threat model, from the architecture review (#27).
 
 ## Honest market assessment (2026-09-27)
 
