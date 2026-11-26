@@ -288,6 +288,23 @@ As built (PR 5, part 1, `job_dir.rs`): `jobs/<job_id>/<attempt>/` holds `lease.j
 
 The canvas and node specs stay strict (`deny_unknown_fields`): the canvas is untrusted input, specs are curated in this repo, and a typo in either should fail loudly. Implemented in `protocol` (P0c PR 1): `FormatVersion` refuses a newer version during deserialization, so every reader gets the check without calling anything; a missing field means version 1, not "current", so old files keep reading as what they are. `job.json` and `result.json` carry `format_version`.
 
+*Installing an agent* (designed 2026-11-26 in the architecture review; packaging is P2). Today the agent is built from source and run in a terminal by a developer: `agent serve` with the token in `JESSIE_AGENT_TOKEN`, as a user in the `docker` group, with Java and Nextflow already installed. A real install on a lab's Linux server:
+
+1. **A release**: one static binary (the musl build), with a checksum and a signature, built by CI for each tag.
+2. **A dedicated system user**, `jessie-agent`, not a person's account, with the work directory and blob cache under `/var/lib/jessie-agent`.
+3. **A config file**, `/etc/jessie-agent/config.toml`: the control plane's URL, the work directory, the data roots (§8.4, layer 1) and resource limits. The token lives in its own file, readable only by that user (mode 0600), rather than in an environment variable.
+4. **Registration** (P2): an admin creates a short-lived **one-time registration token**, and `agent register` exchanges it for the agent token, which never leaves the machine, as GitLab Runner does. Until then, `api create-agent` prints the token for someone to copy.
+5. **A systemd service.** It also closes the orphan gap (§12): systemd runs the agent and everything it starts in one cgroup and cleans up the whole group, so even after a SIGKILL or a crash Nextflow can't outlive it. The settings matter: `KillMode=mixed` sends SIGTERM only to the agent, so the graceful stop (agent → Nextflow → containers) runs as designed, and only what is left at the end is killed; `TimeoutStopSec=90`, longer than the agent's 60 s grace period; `Restart=on-failure`.
+6. `agent check`, then `systemctl enable --now jessie-agent`.
+
+**HPC clusters are different.** They almost never allow Docker (it is root-equivalent) and use **Apptainer** (formerly Singularity) instead. Nextflow supports it and nf-core modules name Apptainer images, but the generated `nextflow.config` hard-codes Docker, so the container engine must become a per-compute-environment setting carried in the lease's `settings`, like the Nextflow version, before the first HPC user. The agent runs on a login node without root, so instead of a system service it runs under `systemd --user` with lingering enabled, or the site's admins run it. With the Slurm executor tasks run on other nodes, so the work directory must be on the shared filesystem, and Nextflow usually comes from `module load nextflow`.
+
+**Managed cloud**: the same binary, in a container image with Java and Nextflow, on an instance we operate.
+
+**What a sysadmin must allow**: outbound HTTPS to the control plane, to the container registry (quay.io or a local mirror) and to Nextflow's download site, unless the install bundles Nextflow. Air-gapped sites mirror the last two.
+
+**Upgrades**: restarting an agent is already safe (the running job becomes `interrupted` and is retried) but throws away its progress. A **drain** mode (stop leasing, finish the current job, exit) makes upgrades free. `format_version` already protects an old agent from messages it can't read.
+
 ### 4.2 Deployment tiers (sovereignty model)
 
 Same UI, same nodes, same everything — a workspace differs only in *where its data plane lives*:
@@ -699,6 +716,8 @@ Guiding principle: **buy everything that isn't the product.** The product is the
 - The inventory flow and samplesheet builder back end (P1, designed in §4.3).
 - Upload of outputs to workspace storage (customer storage or S3), which lifts the rule that dependent jobs run where their inputs are.
 - Building the trust layers (§8.4): agent-side data roots, signed node releases, agent-rendered wiring, sandboxing. Needed before the first real on-prem install.
+- Hosting the control plane. A suggestion from the review: one container image of `api` with `nodes/` copied in, on a small VM or a platform such as Fly.io, managed Postgres (§9), and a reverse proxy such as Caddy in front for TLS (the API listens on plain HTTP on 127.0.0.1, which is right behind a proxy). Migrations at startup are fine at this size.
+- Packaging and installing the agent (§4.1, *Installing an agent*): config file, systemd unit, release builds, registration tokens, the container engine as a setting.
 - (Decided 2026-11-13: protocol versioning, now in §4.1.)
 
 **Known gaps** (from the 2026-11-11 review of P0a/P0b and from building P0c):
@@ -712,6 +731,17 @@ Guiding principle: **buy everything that isn't the product.** The product is the
 - A job pinned to an agent that is gone for good stays `queued` forever; it should fail after a while (§6, Placement).
 - Datasets carry no semantic type, so launch can't check that a dataset fits the input it feeds beyond the file count of FASTQ inputs. FileRecords with types come with the inventory flow (P1).
 - At launch a dataset's samples are ordered by name, not in the order they were registered.
-- If the agent is killed with SIGKILL or crashes mid-job, Nextflow (in its own process group) keeps running as an orphan while the job is reaped and retried, so it can run twice on the same machine.
+- If the agent is killed with SIGKILL or crashes mid-job, Nextflow (in its own process group) keeps running as an orphan while the job is reaped and retried, so it can run twice on the same machine. Running the agent under systemd fixes it (§4.1, *Installing an agent*).
 - `agent serve`: a job that never ran (a bad lease, missing input files) is reported `failed` with no tasks, so its failure reason reads "Nextflow exited abnormally and no task failed"; the real reason is in the result's warnings. A typed status for it needs a `format_version` bump. Heartbeats don't report progress yet; polling has no jitter, so many agents restarted together poll in step; a shutdown while a lease request is in flight abandons it, and that lease expires and is retried (costing an attempt).
+- From the 2026-11-26 architecture review:
+  - `--stub` isn't recorded: a stub agent's placeholder outputs are reported as `succeeded` with digests, indistinguishable from real results, and the cache (§5.2) would reuse them. Fix: an additive `stub` field in `JobResult`, and a per-environment setting that allows stub runs.
+  - Preflight checks the agent's built-in Nextflow version (26.10.5), while `agent serve` runs the version the lease names. An environment pinned to another version would fail preflight on a host that is fine.
+  - Posting a result gives up after about 5 minutes; if the control plane is down longer, the job is reaped and rerun although its `result.json` is on disk. Fix: re-send unreported results at startup.
+  - An agent runs one job at a time. Fine with the local executor; with Slurm one agent could supervise many runs, so `serve` will want a concurrency limit.
+  - axum rejects JSON bodies over 2 MB by default, and a `JobResult` lists every task: a run of roughly 10,000 tasks gets `413`, is retried, reaped, and fails after 3 attempts. Fix: a higher limit on the result route; later, tasks reported incrementally.
+  - Logging is `println!`: no `tracing`, request ids or metrics (leases, results by status, reaper takes, lease-lost 409s).
+  - Two API replicas starting together can conflict while publishing the node library; a `pg_advisory_xact_lock` at the start of `node_library::sync` serializes them (migrations already take one).
+  - No request timeouts on handlers; a slow query holds one of the pool's 10 connections (`tower_http::timeout`).
+  - Nothing is ever deleted: `jobs` (with full task lists in `result`) and `blobs` only grow, and agents never clean up `jobs/<id>/<attempt>/` directories. Needs a retention decision before P1 (archive finished jobs, delete attempts that lost); foreign keys have no `ON DELETE` until then.
+  - Container images are pulled when a run first needs them; a "warm the library's images" step on agents would make first runs predictable.
 - The control plane polls: no `LISTEN/NOTIFY` long polling yet (§4.1). Agents' `last_seen_at` is recorded on each lease poll but nothing reads it yet (a "which agents are alive" view belongs to the UI).
