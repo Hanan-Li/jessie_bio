@@ -5,7 +5,8 @@ canvas, which compiles to Nextflow DSL2. Design: [`docs/DESIGN.md`](docs/DESIGN.
 Background and decisions: [`docs/CONTEXT.md`](docs/CONTEXT.md).
 
 Current stage: P0a (the compiler) and P0b (the agent in local mode) are done;
-P0c, the control plane, is being built (DESIGN.md §4.3 lists the order).
+P0c, the control plane, is built except its end-to-end test in CI
+(DESIGN.md §4.3 lists the order).
 
 ## Layout
 
