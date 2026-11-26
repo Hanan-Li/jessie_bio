@@ -19,8 +19,14 @@
 //! Stopping: the first Ctrl-C or SIGTERM asks Nextflow to stop and waits
 //! up to a grace period; a second one kills it at once.
 
+// `blobs` and `job_dir` are used by `agent serve`, which arrives in the
+// next PR; until then only their tests call them.
+#[cfg_attr(not(test), allow(dead_code))]
+mod blobs;
 mod collect;
 mod hashing;
+#[cfg_attr(not(test), allow(dead_code))]
+mod job_dir;
 mod preflight;
 mod run;
 mod stage;
